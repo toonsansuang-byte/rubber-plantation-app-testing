@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="ระบบจัดการลานยางพาราชุมชน - รับซื้อยาง คำนวณน้ำหนัก คำนวณราคา">
+  <title>ลานยางพาราชุมชน | ระบบจัดการรับซื้อยาง</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===== TOAST CONTAINER ===== -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- ===== LOADING OVERLAY ===== -->
+  <div class="loading-overlay" id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <p>กำลังโหลดข้อมูล...</p>
+  </div>
+
+  <!-- ===== LOGIN PAGE ===== -->
+  <div id="login-page">
+    <div class="login-container">
+      <div class="login-card">
+        <div class="login-logo">
+          <div class="logo-icon" id="login-logo-icon">🌿</div>
+          <h1 id="login-plantation-name">ลานยางพาราชุมชน</h1>
+          <p>ระบบจัดการรับซื้อยางพารา</p>
+        </div>
+
+        <div class="login-error" id="login-error">
+          ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง
+        </div>
+
+        <form id="login-form" onsubmit="return false;">
+          <div class="form-group">
+            <label class="form-label" for="login-username">ชื่อผู้ใช้</label>
+            <input type="text" id="login-username" class="form-input" placeholder="กรอกชื่อผู้ใช้" autocomplete="username" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="login-password">รหัสผ่าน</label>
+            <input type="password" id="login-password" class="form-input" placeholder="กรอกรหัสผ่าน" autocomplete="current-password" required>
+          </div>
+          <button type="submit" class="btn btn-primary btn-block" id="login-btn" onclick="handleLogin()">
+            🔐 เข้าสู่ระบบ
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MAIN APP ===== -->
+  <div id="app">
+
+    <!-- Sidebar Toggle (Mobile) -->
+    <button id="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+    <!-- Sidebar -->
+    <nav id="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-brand">
+          <div class="brand-icon" id="sidebar-logo-icon">🌿</div>
+          <div>
+            <h2 id="sidebar-plantation-name">ลานยางพาราชุมชน</h2>
+            <span class="brand-subtitle" style="color:var(--gold); font-weight:bold;">🧪 ระบบทดสอบ (TESTING)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-nav">
+        <div class="nav-label">เมนูหลัก</div>
+        <a class="sidebar-link active" onclick="navigateTo('dashboard')" id="nav-dashboard">
+          <span class="nav-icon">📊</span> แดชบอร์ด
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('purchase')" id="nav-purchase">
+          <span class="nav-icon">⚖️</span> รับซื้อยาง
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('rounds')" id="nav-rounds">
+          <span class="nav-icon">🔄</span> รอบส่งมอบยาง
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('truck-weights')" id="nav-truck-weights">
+          <span class="nav-icon">🚚</span> ข้อมูลน้ำหนักรถพ่วง
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('history')" id="nav-history">
+          <span class="nav-icon">📋</span> ประวัติธุรกรรม
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('pending')" id="nav-pending">
+          <span class="nav-icon">⏳</span> รายการรอยืนยัน
+          <span id="pending-badge-count" class="badge badge-warning" style="display:none; margin-left:auto; font-size:0.75rem;">0</span>
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('members')" id="nav-members">
+          <span class="nav-icon">👥</span> สมาชิก
+        </a>
+
+        <div class="nav-label" style="margin-top: 12px;">บัญชี & ระบบ</div>
+        <a class="sidebar-link" onclick="navigateTo('profile')" id="nav-profile">
+          <span class="nav-icon">🔑</span> โปรไฟล์ส่วนตัว
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('users')" id="nav-users" style="display: none;">
+          <span class="nav-icon">🛡️</span> จัดการผู้ใช้งาน
+        </a>
+        <a class="sidebar-link" onclick="navigateTo('settings')" id="nav-settings">
+          <span class="nav-icon">⚙️</span> ตั้งค่าลานยาง
+        </a>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="user-profile-badge mb-2">
+          <div class="user-avatar" id="sidebar-user-avatar">?</div>
+          <div class="user-info-text">
+            <div class="user-name" id="sidebar-user-name">ผู้ใช้</div>
+            <div class="user-role-badge" id="sidebar-user-role">พนักงาน</div>
+          </div>
+        </div>
+        <a class="sidebar-link logout" onclick="handleLogout()" id="logout-btn">
+          <span class="nav-icon">🚪</span> ออกจากระบบ
+        </a>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main id="main-content">
+
+      <!-- TESTING ENVIRONMENT BANNER -->
+      <div style="background: linear-gradient(90deg, #d97706, #b45309); color: #ffffff; text-align: center; padding: 10px 16px; font-weight: bold; font-size: 0.9rem; border-radius: var(--radius-md); margin-bottom: 18px; box-shadow: 0 4px 12px rgba(217,119,6,0.25); display: flex; align-items: center; justify-content: center; gap: 8px;">
+        🧪 <span><strong>ระบบทดสอบ (TESTING ENVIRONMENT)</strong> — สามารถลองชั่ง/ลองลบข้อมูลได้ 100% โดยไม่กระทบข้อมูลจริง</span>
+      </div>
+
+      <!-- Active Round Global Status Banner -->
+      <div class="active-round-banner glass-card" id="active-round-banner">
+        <div class="banner-info">
+          <span class="pulse-dot"></span>
+          <div>
+            <span class="banner-title">รอบส่งมอบยางปัจจุบัน:</span>
+            <strong id="banner-round-title">กำลังตรวจสอบ...</strong>
+          </div>
+        </div>
+        <div class="banner-actions" id="banner-round-actions">
+          <button class="btn btn-secondary btn-sm" onclick="openStartRoundModal()">▶️ เริ่มรอบใหม่</button>
+        </div>
+      </div>
+
+      <!-- ===== DASHBOARD ===== -->
+      <div class="section active" id="section-dashboard">
+        <div class="section-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+          <div>
+            <h2>📊 แดชบอร์ด</h2>
+            <p id="dashboard-subtitle">ภาพรวมของรอบส่งมอบยางปัจจุบัน</p>
+          </div>
+          <div id="realtime-status-badge" class="realtime-status-badge" title="ระบบเชื่อมต่อ Realtime เรียบร้อยแล้ว ข้อมูลจะอัปเดตอัตโนมัติ">
+            <span class="live-dot"></span> <span class="live-text">Realtime เชื่อมต่อแล้ว</span>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="glass-card stat-card">
+            <div class="stat-icon">📦</div>
+            <div class="card-title">ธุรกรรมในรอบนี้</div>
+            <div class="card-value" id="stat-round-count">0 <span class="unit">รายการ</span></div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-icon">⚖️</div>
+            <div class="card-title">น้ำหนักรวมในรอบนี้</div>
+            <div class="card-value" id="stat-round-weight">0 <span class="unit">กก.</span></div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-icon">💰</div>
+            <div class="card-title">ยอดเงินรวมในรอบนี้</div>
+            <div class="card-value" id="stat-round-amount">0 <span class="unit">บาท</span></div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-icon">📅</div>
+            <div class="card-title">ยอดเงินเดือนนี้</div>
+            <div class="card-value" id="stat-month-amount">0 <span class="unit">บาท</span></div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-icon">👥</div>
+            <div class="card-title">สมาชิกทั้งหมด</div>
+            <div class="card-value" id="stat-total-members">0 <span class="unit">คน</span></div>
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <h3 style="margin-bottom: 16px; font-size: 1rem;">📋 ธุรกรรมล่าสุดในรอบนี้</h3>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>เวลา</th>
+                  <th>รหัสสมาชิก</th>
+                  <th>ชื่อ</th>
+                  <th>ประเภท</th>
+                  <th>เที่ยว</th>
+                  <th>สุทธิรวม</th>
+                  <th>ยอดเงิน</th>
+                  <th>ผู้บันทึก</th>
+                </tr>
+              </thead>
+              <tbody id="recent-transactions"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="recent-empty" style="display:none;">
+            <div class="empty-icon">📭</div>
+            <p>ยังไม่มีธุรกรรมในรอบปัจจุบัน</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== MEMBERS ===== -->
+      <div class="section" id="section-members">
+        <div class="section-header">
+          <h2>👥 จัดการสมาชิก</h2>
+          <p>เพิ่ม แก้ไข ลบ และค้นหาสมาชิกลานยาง</p>
+        </div>
+
+        <div class="toolbar">
+          <div class="search-box">
+            <input type="text" id="member-search" placeholder="ค้นหาจากรหัสหรือชื่อ..." oninput="searchMembers(this.value)">
+          </div>
+          <button class="btn btn-gold" onclick="forceSeedMembers()">
+            ⚡ นำเข้า 158 สมาชิก
+          </button>
+          <button class="btn btn-secondary" onclick="openImportMemberModal()" id="btn-import-members">
+            📥 นำเข้าจากไฟล์ (Excel/CSV)
+          </button>
+          <button class="btn btn-primary" onclick="openMemberModal()">
+            ➕ เพิ่มสมาชิก
+          </button>
+        </div>
+
+        <div class="glass-card">
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>รหัส</th>
+                  <th>ชื่อ-นามสกุล</th>
+                  <th>เบอร์โทร</th>
+                  <th>เลขที่บัญชี</th>
+                  <th>ประวัติการขาย</th>
+                  <th>วันที่สมัคร</th>
+                  <th>จัดการ</th>
+                </tr>
+              </thead>
+              <tbody id="members-table-body"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="members-empty" style="display:none;">
+            <div class="empty-icon">👤</div>
+            <p>ยังไม่มีสมาชิก กดปุ่ม "เพิ่มสมาชิก" เพื่อเริ่มต้น</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PENDING TRANSACTIONS (DUAL STATION MODE) ===== -->
+      <div class="section" id="section-pending">
+        <div class="section-header">
+          <h2>⏳ รายการรอยืนยัน (สถานีออกใบเสร็จ)</h2>
+          <p>รายการที่ส่งมาจากสถานีชั่งน้ำหนัก (เครื่อง 1) ตรวจสอบข้อมูล ยืนยัน และพิมพ์ใบเสร็จ (เครื่อง 2)</p>
+        </div>
+
+        <div class="glass-card">
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>วันเวลา</th>
+                  <th>รหัสสมาชิก</th>
+                  <th>ชื่อสมาชิก</th>
+                  <th>สุทธิรวม</th>
+                  <th>ยอดเงินรวม</th>
+                  <th>ผู้ชั่ง (เครื่อง 1)</th>
+                  <th>สถานะ</th>
+                  <th>ดำเนินการ</th>
+                </tr>
+              </thead>
+              <tbody id="pending-table-body"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="pending-empty" style="display:none; padding:30px 20px;">
+            <div class="empty-icon">⏳</div>
+            <p>ไม่มีรายการรอยืนยันในขณะนี้</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PURCHASE (MULTI-TRIP) ===== -->
+      <div class="section" id="section-purchase">
+        <div class="section-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+          <div>
+            <h2>⚖️ รับซื้อยาง</h2>
+            <p>คำนวณน้ำหนักหลายเที่ยวและราคา แล้วบันทึกธุรกรรมลงในรอบส่งมอบยางปัจจุบัน</p>
+          </div>
+          <div id="dual-mode-purchase-badge" class="dual-mode-badge inactive">
+            <span class="live-dot yellow"></span> โหมด 2 เครื่อง: ปิดอยู่ (บันทึกและพิมพ์ในเครื่องเดียว)
+          </div>
+        </div>
+
+        <div class="purchase-grid">
+          <!-- Left: Input form -->
+          <div>
+            <!-- Member Selection -->
+            <div class="glass-card" style="margin-bottom: 20px;">
+              <h3 style="margin-bottom: 16px; font-size: 1rem;">👤 เลือกสมาชิก</h3>
+              <div class="search-box" style="margin-bottom: 8px;">
+                <input type="text" id="purchase-member-search" placeholder="พิมพ์รหัสหรือชื่อสมาชิก..." oninput="searchPurchaseMember(this.value)">
+              </div>
+              <div class="member-search-results" id="purchase-member-list"></div>
+              <div class="selected-member-card" id="selected-member-info">
+                <div class="member-avatar" id="selected-member-avatar">?</div>
+                <div class="member-info">
+                  <h4 id="selected-member-name">-</h4>
+                  <p id="selected-member-code">รหัส: -</p>
+                </div>
+                <span class="remove-member" onclick="clearSelectedMember()" title="ยกเลิกเลือก">✕</span>
+              </div>
+            </div>
+
+            <!-- Rubber Type & Settings -->
+            <div class="glass-card" style="margin-bottom: 20px;">
+              <h3 style="margin-bottom: 16px; font-size: 1rem;">⚖️ ข้อมูลยาง</h3>
+              <div class="form-group">
+                <label class="form-label">ประเภทยาง</label>
+                <input type="text" class="form-input" value="ยางก้อนถ้วย" readonly disabled style="opacity: 0.9; font-weight: 600; color: var(--gold);">
+                <input type="hidden" id="rubber-type" value="cup">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cart-weight">น้ำหนักรถเข็น (กก.) — หักทุกเที่ยว</label>
+                <input type="number" id="cart-weight" class="form-input" placeholder="0.00" step="0.01" min="0" oninput="renderTrips(); calculatePrice();">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="price-per-kg">ราคาประมูล ต่อ กก. (บาท)</label>
+                <input type="number" id="price-per-kg" class="form-input" placeholder="0.00" step="0.01" min="0" oninput="calculatePrice()">
+                <div id="net-price-hint" style="font-size: 0.85rem; color: var(--gold); margin-top: 6px; font-weight: 500;">
+                  ราคาหลังหักค่าบริหารจัดการ: 0.00 บาท/กก. (หัก -0.50 บาท)
+                </div>
+              </div>
+            </div>
+
+            <!-- Truck Auto-Tagging -->
+            <div class="glass-card" style="margin-bottom: 20px; border-left: 4px solid var(--gold);">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                <h3 style="font-size: 1rem; margin:0; color:var(--gold);">🚚 จัดขึ้นรถพ่วงประจำรอบ (คำนวณอัตโนมัติ)</h3>
+                <div id="purchase-truck-indicator">
+                  <span class="badge badge-warning" style="font-size:0.8rem; padding:4px 10px;">⚠️ ยังไม่ได้เลือกรถ</span>
+                </div>
+              </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+                <div class="form-group mb-0">
+                  <label class="form-label" style="font-size:0.85rem;" for="purchase-truck-number">รถคันที่ / ทะเบียน</label>
+                  <select id="purchase-truck-number" class="form-input" style="font-size:0.9rem;" onchange="onPurchaseTruckSelect(this.value); updatePurchaseTruckIndicator();">
+                    <option value="">-- ไม่ระบุ --</option>
+                    <option value="คันที่ 1">คันที่ 1</option>
+                    <option value="คันที่ 2">คันที่ 2</option>
+                    <option value="คันที่ 3">คันที่ 3</option>
+                    <option value="NEW">➕ เพิ่มรถคันใหม่...</option>
+                  </select>
+                </div>
+                <div class="form-group mb-0">
+                  <label class="form-label" style="font-size:0.85rem;" for="purchase-trailer-type">ลักษณะพ่วง</label>
+                  <select id="purchase-trailer-type" class="form-input" style="font-size:0.9rem;" onchange="updatePurchaseTruckIndicator();">
+                    <option value="head">🚛 ตัวแม่</option>
+                    <option value="trailer">🚚 ตัวลูก</option>
+                  </select>
+                </div>
+              </div>
+              <div style="font-size:0.78rem; color:var(--gold); margin-top:8px;">
+                📌 ระบบจะจำค่ารถคันนี้สำหรับสมาชิกรายถัดไปให้อัตโนมัติ (เปลี่ยนเฉพาะเมื่อย้ายรถ)
+              </div>
+            </div>
+
+            <!-- Multi-Trip Weighing -->
+            <div class="glass-card">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <h3 style="font-size: 1rem;">🚛 เที่ยวชั่ง</h3>
+                <button class="btn btn-primary btn-sm" onclick="addTrip()">➕ เพิ่มเที่ยว</button>
+              </div>
+              <div id="trips-container">
+                <!-- Dynamic trip inputs rendered by JS -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Calculation result -->
+          <div>
+            <div class="calc-result">
+              <h3>🧮 ผลลัพธ์การคำนวณ</h3>
+
+              <div id="calc-trips-detail">
+                <!-- Dynamic trip calculation details -->
+              </div>
+
+              <div class="calc-row" style="border-top: 2px solid var(--accent-light); padding-top: 12px; margin-top: 8px;">
+                <span class="label" style="font-weight:600;">น้ำหนักสุทธิรวม</span>
+                <span class="value" style="color: var(--text-accent);" id="calc-total-net">0.00 กก.</span>
+              </div>
+              <div class="calc-row" id="calc-deduction-row">
+                <span class="label">หักเปอร์เซ็นต์ (<span id="calc-deduction-pct">0</span>%)</span>
+                <span class="value" style="color: var(--danger);" id="calc-deduction-amount">- 0.00 กก.</span>
+              </div>
+              <div class="calc-row">
+                <span class="label">น้ำหนักหลังหัก</span>
+                <span class="value" style="color: var(--text-accent); font-weight:700;" id="calc-final-weight">0.00 กก.</span>
+              </div>
+              <div class="calc-row">
+                <span class="label">ราคาต่อ กก.</span>
+                <span class="value" id="calc-price-per-kg">0.00 บาท</span>
+              </div>
+
+              <div class="calc-total">
+                <span class="label">💰 ราคารวม</span>
+                <span class="value" id="calc-total-price">0.00 บาท</span>
+              </div>
+            </div>
+
+            <button class="btn btn-gold btn-block" style="margin-top: 20px; padding: 16px;" onclick="saveTransaction()" id="save-transaction-btn">
+              💾 บันทึกธุรกรรม
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== ROUTINE / PURCHASE ROUNDS ===== -->
+      <div class="section" id="section-rounds">
+        <div class="section-header" style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px;">
+          <div>
+            <h2>🔄 รอบส่งมอบยาง</h2>
+            <p>จัดการรอบส่งมอบ ปิดรอบส่งมอบยาง และพิมพ์เอกสารสรุปรอบย้อนหลัง</p>
+          </div>
+          <button class="btn btn-primary" onclick="openStartRoundModal()">
+            ▶️ เริ่มรอบใหม่
+          </button>
+        </div>
+
+        <div class="glass-card" style="margin-bottom: 24px;">
+          <h3 style="margin-bottom: 16px; font-size: 1rem; color: var(--gold);">⚡ รอบที่กำลังเปิดใช้งานอยู่ (Active Round)</h3>
+          <div id="active-round-detail">
+            <!-- Rendered dynamically -->
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <h3 style="margin-bottom: 16px; font-size: 1rem;">📜 ประวัติรอบส่งมอบยางทั้งหมด</h3>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ชื่อรอบ</th>
+                  <th>สถานะ</th>
+                  <th>วันที่เริ่ม</th>
+                  <th>วันที่ปิดรอบ</th>
+                  <th>ผู้ปิดรอบ</th>
+                  <th>สถิติสรุป</th>
+                  <th>เอกสารสรุป</th>
+                </tr>
+              </thead>
+              <tbody id="rounds-table-body"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="rounds-empty" style="display:none;">
+            <div class="empty-icon">📂</div>
+            <p>ยังไม่มีประวัติรอบส่งมอบยาง กดปุ่ม "เริ่มรอบใหม่" เพื่อเริ่มต้น</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== TRUCK WEIGHTS (ข้อมูลน้ำหนักรถพ่วง) ===== -->
+      <div class="section" id="section-truck-weights">
+        <div class="section-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+          <div>
+            <h2>🚚 ข้อมูลน้ำหนักรถพ่วง</h2>
+            <p>บันทึกและจัดการน้ำหนักจัดส่งมอบยางขึ้นรถพ่วงแยกรายคัน (ตัวแม่ / ตัวลูก) ประจำรอบ</p>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <span style="font-size:0.85rem; font-weight:600; color:var(--text-secondary);">📅 เลือกรอบ:</span>
+              <select id="tw-round-filter" class="form-input" style="padding:6px 12px; font-size:0.85rem; width:auto; border-color:var(--gold);" onchange="renderTruckWeights(this.value)">
+                <!-- Rendered dynamically -->
+              </select>
+            </div>
+            <button class="btn btn-gold btn-sm" onclick="printTruckWeightsReport()">🖨️ พิมพ์เอกสารสรุปน้ำหนักรถพ่วง</button>
+            <button class="btn btn-secondary btn-sm" onclick="navigateTo('rounds')">🔄 ดูรอบส่งมอบยาง</button>
+          </div>
+        </div>
+
+        <!-- Reconciliation Bar / Round Summary -->
+        <div class="glass-card mb-4" id="tw-summary-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+            <h3 style="font-size:1.1rem; margin:0; color:var(--text-accent);" id="tw-round-title">⚡ ข้อมูลน้ำหนักรถพ่วงประจำรอบปัจจุบัน</h3>
+            <div id="tw-discrepancy-badge"></div>
+          </div>
+          <p style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:14px;" id="tw-discrepancy-text">
+            ตรวจสอบเปรียบเทียบระหว่างยอดรับซื้อยางจากสมาชิก และยอดน้ำหนักยางที่จัดขึ้นรถพ่วง
+          </p>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:14px;">
+            <div style="background:rgba(255,255,255,0.02); padding:14px; border-radius:var(--radius-md); border:1px solid var(--border);">
+              <span style="color:var(--text-muted); display:block; font-size:0.8rem;">📦 ยอดรับซื้อรวมจากสมาชิก</span>
+              <strong style="font-size:1.3rem; color:var(--text-primary);" id="tw-total-purchased">0.00 กก.</strong>
+              <div style="font-size:0.8rem; color:var(--gold);" id="tw-total-amount">0.00 บาท</div>
+            </div>
+            <div style="background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.2); padding:14px; border-radius:var(--radius-md);">
+              <span style="color:var(--green); display:block; font-size:0.8rem;">🚚 ยอดน้ำหนักขึ้นรถพ่วงรวมทุกคัน</span>
+              <strong style="font-size:1.3rem; color:var(--green);" id="tw-total-trucks">0.00 กก.</strong>
+              <div style="font-size:0.8rem; color:var(--text-muted);" id="tw-truck-breakdown">ตัวแม่: 0.00 | ตัวลูก: 0.00</div>
+            </div>
+            <div style="background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.3); padding:14px; border-radius:var(--radius-md);" id="tw-discrepancy-card">
+              <span style="color:var(--warning); display:block; font-size:0.8rem;">⚖️ ผลต่าง (ยางคงเหลือ/ขาด/เกิน)</span>
+              <strong style="font-size:1.3rem; color:var(--warning);" id="tw-discrepancy-weight">0.00 กก.</strong>
+              <div style="font-size:0.8rem; color:var(--text-muted);" id="tw-discrepancy-subtext">ยางยังเหลืออยู่ในลาน</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Truck Weights Table (Auto-calculated from Member Receipts) -->
+        <div class="glass-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h3 style="font-size: 1.05rem; margin:0; color:var(--text-accent);">📜 ตารางสรุปข้อมูลน้ำหนักรถพ่วงในรอบนี้</h3>
+              <span style="font-size:0.8rem; color:var(--text-muted);">คำนวณสะสมอัตโนมัติจากใบเสร็จรับซื้อของสมาชิกที่ติดป้ายรถ</span>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="renderTruckWeights()">🔄 รีเฟรชข้อมูล</button>
+          </div>
+
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>รถคันที่ / ทะเบียน</th>
+                  <th>🚛 น้ำหนักพ่วงตัวแม่ (กก.)</th>
+                  <th>🚚 น้ำหนักพ่วงตัวลูก (กก.)</th>
+                  <th>📊 รวมน้ำหนักทั้งคัน (กก.)</th>
+                  <th>👥 จำนวนสมาชิก/รายการ</th>
+                  <th>รายละเอียดรายการในรถ</th>
+                </tr>
+              </thead>
+              <tbody id="tw-table-body"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="tw-empty-state" style="display:none; padding:30px 20px;">
+            <div class="empty-icon">🚛</div>
+            <p>ยังไม่มีการบันทึกข้อมูลน้ำหนักรถพ่วงในรอบนี้</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== HISTORY ===== -->
+      <div class="section" id="section-history">
+        <div class="section-header">
+          <h2>📋 ประวัติธุรกรรม</h2>
+          <p>ดูรายการธุรกรรมทั้งหมดและกรองข้อมูลตามรอบหรือวันที่</p>
+        </div>
+
+        <div class="filter-bar">
+          <div class="form-group" style="min-width: 200px;">
+            <label class="form-label">เลือกรอบส่งมอบยาง</label>
+            <select id="history-round-filter" class="form-input" onchange="filterHistory()">
+              <option value="">ทุกรอบส่งมอบยาง</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">วันที่เริ่ม</label>
+            <input type="date" id="history-date-from" class="form-input" onchange="filterHistory()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">วันที่สิ้นสุด</label>
+            <input type="date" id="history-date-to" class="form-input" onchange="filterHistory()">
+          </div>
+          <div class="form-group" style="min-width: 180px;">
+            <label class="form-label">สมาชิก</label>
+            <select id="history-member-filter" class="form-input" onchange="filterHistory()">
+              <option value="">สมาชิกทั้งหมด</option>
+            </select>
+          </div>
+          <button class="btn btn-secondary" onclick="clearHistoryFilter()" style="align-self: flex-end;">
+            🔄 ล้างตัวกรอง
+          </button>
+        </div>
+
+        <div class="history-summary" id="history-summary">
+          <div class="glass-card summary-card">
+            <div class="card-title">จำนวนรายการ</div>
+            <div class="card-value" id="summary-count">0</div>
+          </div>
+          <div class="glass-card summary-card">
+            <div class="card-title">น้ำหนักรวม</div>
+            <div class="card-value" id="summary-weight">0 <span class="unit">กก.</span></div>
+          </div>
+          <div class="glass-card summary-card">
+            <div class="card-title">ยอดเงินรวม</div>
+            <div class="card-value" id="summary-amount">0 <span class="unit">บาท</span></div>
+          </div>
+        </div>
+
+        <!-- History Bulk Action Bar -->
+        <div id="history-batch-action-bar" style="display:none; background:rgba(239, 68, 68, 0.1); border:1px solid rgba(239, 68, 68, 0.3); padding:10px 16px; border-radius:var(--radius-md); margin-bottom:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+          <div style="font-size:0.9rem; color:var(--danger);">
+            <strong>☑️ เลือกอยู่ <span id="history-selected-count">0</span> รายการ</strong>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-danger btn-sm" onclick="confirmDeleteSelectedHistory()">
+              🗑️ ลบรายการที่เลือก (<span id="history-btn-count">0</span>)
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="deselectAllHistory()">
+              ✕ ยกเลิกการเลือก
+            </button>
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:10px;">
+            <div style="font-weight:600; font-size:0.95rem; color:var(--text-accent);">📜 รายการประวัติธุรกรรม</div>
+            <button class="btn btn-danger btn-sm" id="history-delete-all-btn" onclick="confirmDeleteAllFilteredHistory()" style="display:none;">
+              🗑️ ลบประวัติทั้งหมดในตัวกรองนี้ (<span id="history-total-count-badge">0</span> รายการ)
+            </button>
+          </div>
+
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:40px; text-align:center;">
+                    <input type="checkbox" id="history-select-all" onchange="toggleSelectAllHistory(this.checked)" title="เลือกทั้งหมด">
+                  </th>
+                  <th>วันที่</th>
+                  <th>รหัส</th>
+                  <th>ชื่อสมาชิก</th>
+                  <th>ประเภท</th>
+                  <th>เที่ยว</th>
+                  <th>สุทธิรวม</th>
+                  <th>หลังหัก%</th>
+                  <th>ราคา/กก.</th>
+                  <th>ยอดเงิน</th>
+                  <th>ผู้บันทึก</th>
+                  <th>จัดการ</th>
+                </tr>
+              </thead>
+              <tbody id="history-table-body"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="history-empty" style="display:none;">
+            <div class="empty-icon">📭</div>
+            <p>ไม่พบข้อมูลธุรกรรม</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PROFILE ===== -->
+      <div class="section" id="section-profile">
+        <div class="section-header">
+          <h2>🔑 โปรไฟล์ส่วนตัว</h2>
+          <p>จัดการข้อมูลส่วนตัวและเปลี่ยนรหัสผ่านของคุณ</p>
+        </div>
+
+        <div class="settings-grid">
+          <!-- Profile Display Name -->
+          <div class="glass-card">
+            <div class="settings-section-title">👤 ข้อมูลผู้ใช้</div>
+            <div class="form-group">
+              <label class="form-label">ชื่อผู้ใช้ (Username)</label>
+              <input type="text" id="profile-username" class="form-input" disabled style="opacity: 0.7;">
+            </div>
+            <div class="form-group">
+              <label class="form-label">สถานะ / สิทธิ์</label>
+              <input type="text" id="profile-role" class="form-input" disabled style="opacity: 0.7;">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="profile-display-name">ชื่อที่แสดง (Display Name)</label>
+              <input type="text" id="profile-display-name" class="form-input" placeholder="กรอกชื่อที่แสดงบนใบเสร็จ/ระบบ">
+              <small style="color: var(--text-muted); display: block; margin-top: 4px;">ชื่อนี้จะปรากฏเป็น "ผู้จัดทำ" ในใบเสร็จรับเงินเมื่อคุณบันทึกธุรกรรม</small>
+            </div>
+            <button class="btn btn-primary" onclick="saveProfileName()" style="margin-top: 8px;">
+              💾 บันทึกชื่อที่แสดง
+            </button>
+          </div>
+
+          <!-- Password Change -->
+          <div class="glass-card">
+            <div class="settings-section-title">🔐 เปลี่ยนรหัสผ่านส่วนตัว</div>
+            <div class="form-group">
+              <label class="form-label" for="profile-old-password">รหัสผ่านเดิม</label>
+              <input type="password" id="profile-old-password" class="form-input" placeholder="กรอกรหัสผ่านเดิม">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="profile-new-password">รหัสผ่านใหม่</label>
+              <input type="password" id="profile-new-password" class="form-input" placeholder="กรอกรหัสผ่านใหม่">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="profile-confirm-password">ยืนยันรหัสผ่านใหม่</label>
+              <input type="password" id="profile-confirm-password" class="form-input" placeholder="กรอกรหัสผ่านใหม่อีกครั้ง">
+            </div>
+            <button class="btn btn-gold" onclick="changeMyPassword()" style="margin-top: 8px;">
+              🔑 เปลี่ยนรหัสผ่าน
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== USER MANAGEMENT (ADMIN ONLY) ===== -->
+      <div class="section" id="section-users">
+        <div class="section-header">
+          <h2>🛡️ จัดการผู้ใช้งานระบบ</h2>
+          <p>เพิ่ม แก้ไข กำหนดรหัสผ่าน และสิทธิ์การใช้งานของแอดมินและพนักงาน (เฉพาะแอดมินเท่านั้น)</p>
+        </div>
+
+        <div class="toolbar">
+          <button class="btn btn-primary" onclick="openUserModal()">
+            ➕ เพิ่มผู้ใช้งานใหม่
+          </button>
+        </div>
+
+        <div class="glass-card">
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>ชื่อผู้ใช้</th>
+                  <th>ชื่อที่แสดง</th>
+                  <th>ตำแหน่ง</th>
+                  <th>สิทธิ์</th>
+                  <th>วันที่สร้าง</th>
+                  <th>จัดการ</th>
+                </tr>
+              </thead>
+              <tbody id="users-table-body"></tbody>
+            </table>
+          </div>
+          <div class="empty-state" id="users-empty" style="display:none;">
+            <div class="empty-icon">🛡️</div>
+            <p>ไม่พบข้อมูลผู้ใช้งาน</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== SETTINGS ===== -->
+      <div class="section" id="section-settings">
+        <div class="section-header">
+          <h2>⚙️ ตั้งค่าลานยาง</h2>
+          <p>ตั้งค่าราคายาง ข้อมูลลานยาง และน้ำหนักรถเข็นเริ่มต้น</p>
+        </div>
+
+        <div class="settings-grid">
+          <!-- Plantation Info -->
+          <div class="glass-card">
+            <div class="settings-section-title">🏠 ข้อมูลลานยาง & ชื่อผู้ประมูล (สำหรับใบเสร็จ)</div>
+            <div class="form-group mb-3">
+              <label class="form-label">🖼️ โลโก้ลานยาง (เปลี่ยนรูปหน้าล็อคอิน & เมนูแถบข้าง)</label>
+              <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:rgba(255,255,255,0.02); padding:12px 14px; border-radius:var(--radius-md); border:1px solid var(--border);">
+                <div id="setting-logo-preview" style="width:54px; height:54px; border-radius:var(--radius-md); background:var(--primary-glow); display:flex; align-items:center; justify-content:center; font-size:1.8rem; overflow:hidden; border:1px solid var(--border); flex-shrink:0;">
+                  🌿
+                </div>
+                <div style="flex:1; min-width:200px;">
+                  <input type="file" id="setting-logo-file" accept="image/*" style="display:none;" onchange="handleLogoFileSelect(event)">
+                  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('setting-logo-file').click()">📁 เลือกรูปภาพจากเครื่อง...</button>
+                    <button type="button" class="btn btn-danger btn-sm" onclick="removeCustomLogo()">🗑️ คืนค่าโลโก้เริ่มต้น (🌿)</button>
+                  </div>
+                  <span style="font-size:0.78rem; color:var(--text-secondary);">รองรับรูปภาพ JPG, PNG, WebP (รูปสี่เหลี่ยมจัตุรัสจะสวยงามที่สุด)</span>
+                </div>
+              </div>
+            </div>
+            <div class="form-group mb-3">
+              <label class="form-label" for="setting-plantation-name">ชื่อกลุ่ม / ลานยาง</label>
+              <input type="text" id="setting-plantation-name" class="form-input" placeholder="กลุ่มเกษตรกรชาวสวนยาง กยท.ท่าสะแก">
+            </div>
+            <div class="form-group mb-3">
+              <label class="form-label" for="setting-plantation-address">ที่อยู่ / เลขที่ หมู่ ตำบล อำเภอ จังหวัด</label>
+              <input type="text" id="setting-plantation-address" class="form-input" placeholder="เลขที่ 127 หมู่7 ต.ท่าสะแก อ.ชาติตระการ จ.พิษณุโลก">
+            </div>
+            <div class="form-group mb-0">
+              <label class="form-label" for="setting-auction-buyer">ชื่อผู้ประมูล / พ่อค้าปัจจุบัน (แสดงในใบเสร็จ)</label>
+              <input type="text" id="setting-auction-buyer" class="form-input" placeholder="เช่น เฮียต้อม ยางพารา">
+            </div>
+          </div>
+
+          <!-- Prices -->
+          <div class="glass-card">
+            <div class="settings-section-title">💰 ราคายางก้อนถ้วย & ค่าบริหารจัดการ</div>
+            <div class="settings-row">
+              <div class="form-group">
+                <label class="form-label" for="setting-price-cup">ราคาประมูลเริ่มต้น (บาท/กก.)</label>
+                <input type="number" id="setting-price-cup" class="form-input" step="0.01" min="0" placeholder="0.00">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="setting-yard-fee">ค่าบริหารจัดการ (บาท/กก.)</label>
+                <input type="number" id="setting-yard-fee" class="form-input" step="0.01" min="0" placeholder="0.50">
+              </div>
+            </div>
+          </div>
+
+          <!-- Cart Weight & Deduction -->
+          <div class="glass-card">
+            <div class="settings-section-title">🛒 น้ำหนักและเปอร์เซ็นต์หัก</div>
+            <div class="settings-row">
+              <div class="form-group">
+                <label class="form-label" for="setting-cart-weight">น้ำหนักรถเข็นเริ่มต้น (กก.)</label>
+                <input type="number" id="setting-cart-weight" class="form-input" step="0.01" min="0" placeholder="0.00">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="setting-deduction-percent">เปอร์เซ็นต์หักน้ำหนัก (%)</label>
+                <input type="number" id="setting-deduction-percent" class="form-input" step="0.1" min="0" max="100" placeholder="0">
+              </div>
+            </div>
+          </div>
+
+          <!-- Multi-Station & Printing Options -->
+          <div class="glass-card">
+            <div class="settings-section-title">⚡ โหมดการทำงาน & การแสดงผลใบเสร็จ</div>
+            
+            <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:12px 16px; border-radius:var(--radius-md); border:1px solid var(--border); margin-bottom:12px;">
+              <div>
+                <label class="form-label" style="margin:0; font-weight:600;">⚡ โหมดทำงาน 2 เครื่อง (สถานีชั่ง & สถานีออกใบเสร็จ)</label>
+                <p style="font-size:0.8rem; color:var(--text-secondary); margin-top:2px;">เมื่อเปิด: เครื่อง 1 ส่งข้อมูลไปรอยืนยันที่เครื่อง 2 เพื่อตรวจสอบและพิมพ์ใบเสร็จ</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-dual-station-mode">
+                <span class="slider round"></span>
+              </label>
+            </div>
+
+            <div class="form-group" style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:12px 16px; border-radius:var(--radius-md); border:1px solid var(--border);">
+              <div>
+                <label class="form-label" style="margin:0; font-weight:600;">💳 แสดงชื่อผู้จ่ายเงินอัตโนมัติในใบเสร็จ</label>
+                <p style="font-size:0.8rem; color:var(--text-secondary); margin-top:2px;">เมื่อปิด: ช่องผู้จ่ายเงินจะเป็นช่องเซ็นเปล่า (สำหรับกรณีโอนตรงผ่านธนาคาร)</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-show-payer-name" checked>
+                <span class="slider round"></span>
+              </label>
+            </div>
+          </div>
+
+          <button class="btn btn-primary" onclick="saveSettings()" style="justify-self: start; padding: 14px 40px;">
+            💾 บันทึกการตั้งค่า
+          </button>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ===== USER MODAL (ADMIN ONLY) ===== -->
+  <div class="modal-overlay" id="user-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="user-modal-title">เพิ่มผู้ใช้งานใหม่</h3>
+        <button class="modal-close" onclick="closeUserModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="user-id-hidden">
+        <div class="form-group">
+          <label class="form-label" for="user-username">ชื่อผู้ใช้ (Username สำหรับล็อกอิน)</label>
+          <input type="text" id="user-username" class="form-input" placeholder="เช่น staff01, admin2">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="user-display-name">ชื่อที่แสดง (Display Name)</label>
+          <input type="text" id="user-display-name" class="form-input" placeholder="เช่น นายสมชาย ใจดี">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="user-position">ตำแหน่ง (Position)</label>
+          <input type="text" id="user-position" class="form-input" placeholder="เช่น ประธานกรรมการ, พนักงาน, เหรัญญิก">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="user-password">รหัสผ่านเริ่มต้น</label>
+          <input type="password" id="user-password" class="form-input" placeholder="กรอกรหัสผ่าน">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="user-role">ระดับสิทธิ์ (Role)</label>
+          <select id="user-role" class="form-input">
+            <option value="user">ผู้ใช้งานทั่วไป (พนักงาน)</option>
+            <option value="admin">แอดมิน (Admin - จัดการผู้ใช้ได้)</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeUserModal()">ยกเลิก</button>
+        <button class="btn btn-primary" onclick="saveUser()">💾 บันทึกผู้ใช้</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== START NEW ROUND MODAL ===== -->
+  <div class="modal-overlay" id="start-round-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>▶️ เริ่มรอบส่งมอบยางใหม่</h3>
+        <button class="modal-close" onclick="closeStartRoundModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px;">
+          การเริ่มรอบใหม่จะจัดกลุ่มธุรกรรมรับซื้อยางหลังจากนี้ไว้ในรอบเดียวกันโดยอัตโนมัติ
+        </p>
+        <div class="form-group">
+          <label class="form-label" for="round-title-input">ชื่อรอบส่งมอบยาง</label>
+          <input type="text" id="round-title-input" class="form-input" placeholder="เช่น รอบ 1 - ก.ค. 2569">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeStartRoundModal()">ยกเลิก</button>
+        <button class="btn btn-primary" onclick="saveStartNewRound()">▶️ เริ่มรอบใหม่</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MEMBER MODAL ===== -->
+  <div class="modal-overlay" id="member-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="member-modal-title">เพิ่มสมาชิกใหม่</h3>
+        <button class="modal-close" onclick="closeMemberModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="member-id-hidden">
+        <div class="form-group">
+          <label class="form-label" for="member-code">รหัสสมาชิก (ตัวเลข)</label>
+          <input type="text" id="member-code" class="form-input" placeholder="เช่น 001, 002, 003" pattern="[0-9]*" inputmode="numeric">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="member-name">ชื่อ-นามสกุล</label>
+          <input type="text" id="member-name" class="form-input" placeholder="กรอกชื่อ-นามสกุล">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="member-phone">เบอร์โทรศัพท์</label>
+          <input type="tel" id="member-phone" class="form-input" placeholder="เช่น 0812345678">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="member-account">เลขที่บัญชีธนาคาร</label>
+          <input type="text" id="member-account" class="form-input" placeholder="เช่น 123-4-56789-0" inputmode="numeric">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeMemberModal()">ยกเลิก</button>
+        <button class="btn btn-primary" onclick="saveMember()">💾 บันทึก</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CONFIRM MODAL ===== -->
+  <div class="modal-overlay" id="confirm-modal">
+    <div class="modal-content" style="max-width: 400px;">
+      <div class="modal-header">
+        <h3>ยืนยันการดำเนินการ</h3>
+        <button class="modal-close" onclick="closeConfirmModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="confirm-message" id="confirm-message">
+          <span class="confirm-icon">⚠️</span>
+          คุณต้องการดำเนินการนี้ใช่หรือไม่?
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeConfirmModal()">ยกเลิก</button>
+        <button class="btn btn-danger" id="confirm-action-btn" onclick="">ยืนยัน</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== RECEIPT MODAL ===== -->
+  <div class="modal-overlay" id="receipt-modal">
+    <div class="modal-content" style="max-width: 540px;">
+      <div class="modal-header">
+        <h3>🧾 ใบเสร็จรับเงิน</h3>
+        <button class="modal-close" onclick="closeReceiptModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="receipt-content" id="receipt-content"></div>
+      </div>
+      <div class="modal-footer" style="justify-content: space-between; align-items: center;">
+        <div style="font-size:0.85rem; color:var(--text-secondary);">
+          📄 สั่งพิมพ์ 2 สำเนาแบ่งครึ่ง (สำหรับสมาชิก 1 ใบ / ลานยาง 1 ใบ ใน A4 แผ่นเดียว)
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary" onclick="closeReceiptModal()">ปิด</button>
+          <button class="btn btn-primary" onclick="printReceipt()">🖨️ พิมพ์ใบเสร็จ (A4 แผ่นเดียว)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== ROUND SUMMARY REPORT MODAL ===== -->
+  <div class="modal-overlay" id="round-report-modal">
+    <div class="modal-content" style="max-width: 750px;">
+      <div class="modal-header">
+        <h3>📊 เอกสารสรุปรอบส่งมอบยาง</h3>
+        <button class="modal-close" onclick="closeRoundReportModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="round-report-printable" id="round-report-content">
+          <!-- Rendered dynamically for printing/previewing -->
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div style="font-size:0.85rem; color:var(--text-secondary);">
+          📄 เอกสารสรุปสำหรับยื่นธนาคาร (ส่งโอนเงินเข้าบัญชีสมาชิก)
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn btn-secondary" onclick="closeRoundReportModal()">ปิด</button>
+          <button class="btn btn-gold" onclick="exportRoundToExcel()">📊 ดาวน์โหลด Excel (.xlsx)</button>
+          <button class="btn btn-primary" onclick="printRoundReport()">🖨️ พิมพ์ / บันทึก PDF (A4)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MEMBER SALES HISTORY MODAL ===== -->
+  <div class="modal-overlay" id="member-sales-modal">
+    <div class="modal-content" style="max-width: 800px;">
+      <div class="modal-header">
+        <h3>📊 ประวัติการขายยางรายสมาชิก</h3>
+        <button class="modal-close" onclick="closeMemberSalesModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="selected-member-card show mb-3" style="margin-bottom: 20px;">
+          <div class="member-avatar" id="m-history-avatar">?</div>
+          <div class="member-info">
+            <h4 id="m-history-name">-</h4>
+            <p id="m-history-code-account">รหัส: - | บัญชี: -</p>
+          </div>
+        </div>
+
+        <!-- Member Summary Grid -->
+        <div class="stats-grid mb-3" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 20px;">
+          <div class="glass-card summary-card">
+            <div class="card-title">จำนวนรอบที่ขาย</div>
+            <div class="card-value" id="m-stat-rounds-count">0 <span class="unit">รอบ</span></div>
+          </div>
+          <div class="glass-card summary-card">
+            <div class="card-title">จำนวนครั้งที่ขาย</div>
+            <div class="card-value" id="m-stat-tx-count">0 <span class="unit">ครั้ง</span></div>
+          </div>
+          <div class="glass-card summary-card">
+            <div class="card-title">น้ำหนักรวมทั้งหมด</div>
+            <div class="card-value" id="m-stat-total-weight">0 <span class="unit">กก.</span></div>
+          </div>
+          <div class="glass-card summary-card">
+            <div class="card-title">ยอดเงินรวมทั้งหมด</div>
+            <div class="card-value" id="m-stat-total-amount" style="color: var(--gold);">0 <span class="unit">บาท</span></div>
+          </div>
+        </div>
+
+        <h4 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 12px;">📜 ประวัติการขายยางทั้งหมด</h4>
+        <div class="table-container" style="max-height: 300px; overflow-y: auto;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>วันเวลา</th>
+                <th>รอบการรับซื้อ</th>
+                <th>ประเภท</th>
+                <th>เที่ยว</th>
+                <th>สุทธิ</th>
+                <th>ยอดเงิน</th>
+                <th>ผู้บันทึก</th>
+                <th>ใบเสร็จ</th>
+              </tr>
+            </thead>
+            <tbody id="m-history-table-body"></tbody>
+          </table>
+        </div>
+        <div class="empty-state" id="m-history-empty" style="display:none; padding: 20px;">
+          <div class="empty-icon">📭</div>
+          <p>สมาชิกท่านนี้ยังไม่มีประวัติการขายยาง</p>
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:0.85rem; font-weight:600; color:var(--text-secondary);">📄 รูปแบบพิมพ์:</span>
+          <select id="member-summary-print-format" class="form-input" style="padding:6px 12px; font-size:0.85rem; width:auto;" onchange="onMemberSummaryFormatChange(this.value)">
+            <option value="1">1 สำเนาต่อแผ่น (เต็มแผ่น A4)</option>
+            <option value="2">2 สำเนาต่อแผ่น (A4 แบ่งครึ่ง)</option>
+          </select>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-secondary" onclick="closeMemberSalesModal()">ปิด</button>
+          <button class="btn btn-primary" onclick="printMemberSalesSummary()">🖨️ พิมพ์เอกสารสรุปรายการขาย</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== IMPORT MEMBER MODAL ===== -->
+  <div class="modal-overlay" id="import-member-modal">
+    <div class="modal-content" style="max-width: 800px;">
+      <div class="modal-header">
+        <h3>📥 นำเข้าข้อมูลสมาชิกจากไฟล์ (Excel / CSV)</h3>
+        <button class="modal-close" onclick="closeImportMemberModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="file-dropzone mb-3" id="file-dropzone" onclick="document.getElementById('member-file-input').click()">
+          <div class="dropzone-icon">📄</div>
+          <h4>คลิกเพื่อเลือกไฟล์ หรือลากไฟล์มาวางที่นี่</h4>
+          <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 4px;">รองรับไฟล์ .xlsx, .xls และ .csv</p>
+          <input type="file" id="member-file-input" accept=".xlsx, .xls, .csv" style="display:none;" onchange="handleMemberFileSelect(event)">
+        </div>
+
+        <div style="background: rgba(16, 185, 129, 0.05); padding: 12px 16px; border-radius: var(--radius-md); border: 1px solid var(--border); font-size: 0.85rem; margin-bottom: 16px;">
+          <strong>ℹ️ คอลัมน์ที่รองรับในไฟล์:</strong>
+          <span style="color: var(--text-secondary); display: block; margin-top: 4px;">
+            1. <strong>รหัสสมาชิก</strong> (เช่น ก00001, ก00024 จะถูกแปลงเป็น 001, 024 อัตโนมัติ)<br>
+            2. <strong>ชื่อ-นามสกุล</strong> (จำเป็นต้องมี)<br>
+            3. <strong>เลขที่บัญชี</strong> (ไม่บังคับ)
+          </span>
+        </div>
+
+        <div id="import-preview-section" style="display: none;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h4 style="font-size: 0.95rem; font-weight: 600;">🔍 ตัวอย่างข้อมูลที่จะนำเข้า (<span id="import-count-total">0</span> รายการ)</h4>
+            <div style="display: flex; gap: 8px; font-size: 0.8rem;">
+              <span class="badge badge-green" id="import-badge-valid">🟢 พร้อมนำเข้า: 0</span>
+              <span class="badge badge-danger" id="import-badge-invalid">🔴 มีปัญหา: 0</span>
+            </div>
+          </div>
+
+          <div class="table-container" style="max-height: 250px; overflow-y: auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>สถานะ</th>
+                  <th>รหัสเดิมในไฟล์</th>
+                  <th>รหัสหลังแปลง (3 หลัก)</th>
+                  <th>ชื่อ-นามสกุล</th>
+                  <th>เลขที่บัญชี</th>
+                  <th>หมายเหตุ</th>
+                </tr>
+              </thead>
+              <tbody id="import-preview-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeImportMemberModal()">ยกเลิก</button>
+        <button class="btn btn-primary" id="confirm-import-btn" disabled onclick="confirmImportMembers()">
+          💾 ยืนยันนำเข้าข้อมูล
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== WEIGHT & CALCULATION WARNING MODAL ===== -->
+  <div class="modal-overlay" id="weight-warning-modal" style="z-index: 1100;">
+    <div class="modal-content" style="max-width: 560px; border-left: 6px solid var(--warning);">
+      <div class="modal-header">
+        <h3 style="color: var(--warning); display: flex; align-items: center; gap: 8px;">
+          <span>⚠️</span> ตรวจพบข้อสงสัยการคำนวณน้ำหนัก / ราคา
+        </h3>
+        <button class="modal-close" onclick="closeWeightWarningModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 0.95rem; color: var(--text-primary); margin-bottom: 14px;">
+          ระบบตรวจพบตัวเลขที่มีความเสี่ยงผิดพลาด กรุณาตรวจสอบให้แน่ใจก่อนบันทึก:
+        </p>
+
+        <div id="weight-warning-list" style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: var(--radius-md); padding: 14px 16px; margin-bottom: 16px; font-size: 0.9rem; color: var(--text-primary);">
+          <!-- Dynamic warnings rendered here -->
+        </div>
+
+        <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.4;">
+          💡 หากกรอกตัวเลขผิด (เช่น ลืมใส่เลข 0 หรือใส่น้ำหนักชั่งรวมผิด) ให้กด <strong>"กลับไปแก้ไขตัวเลข"</strong><br>
+          หากเป็นกรณีพิเศษและต้องการบันทึกตามตัวเลขนี้จริง ให้กด <strong>"ยืนยันว่าถูกต้องแล้ว"</strong>
+        </p>
+      </div>
+      <div class="modal-footer" style="gap: 10px; flex-wrap: wrap;">
+        <button class="btn btn-secondary" onclick="closeWeightWarningModal()">✕ กลับไปแก้ไขตัวเลข</button>
+        <button class="btn btn-gold" id="weight-warning-confirm-btn">⚠️ ยืนยันว่าถูกต้องแล้ว</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PENDING DETAIL MODAL (STATION 2) ===== -->
+  <div class="modal-overlay" id="pending-detail-modal">
+    <div class="modal-content" style="max-width: 650px;">
+      <div class="modal-header">
+        <h3>🔍 รายละเอียดรายการรอยืนยัน</h3>
+        <button class="modal-close" onclick="closePendingDetailModal()">✕</button>
+      </div>
+      <div class="modal-body" id="pending-detail-body" style="max-height: 70vh; overflow-y: auto;"></div>
+      <div class="modal-footer" id="pending-detail-actions" style="justify-content: flex-end; gap: 8px; flex-wrap: wrap;"></div>
+    </div>
+  </div>
+
+  <!-- ===== EDIT TRUCK DELIVERY MODAL (ROUNDS) ===== -->
+  <div class="modal-overlay" id="edit-truck-delivery-modal">
+    <div class="modal-content" style="max-width: 500px;">
+      <div class="modal-header">
+        <h3>🚚 แก้ไขข้อมูลจัดขึ้นรถพ่วง</h3>
+        <button class="modal-close" onclick="closeEditTruckDeliveryModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group mb-3">
+          <label class="form-label" for="edit-td-number">🚚 รถคันที่ / ทะเบียน</label>
+          <input type="text" id="edit-td-number" class="form-input" placeholder="เช่น คันที่ 1">
+        </div>
+        <div class="form-group mb-3">
+          <label class="form-label" for="edit-td-head">🚛 น้ำหนักรวมพ่วงตัวแม่ (กก.)</label>
+          <input type="number" id="edit-td-head" class="form-input" placeholder="0.00" step="0.01" min="0">
+        </div>
+        <div class="form-group mb-3">
+          <label class="form-label" for="edit-td-trailer">🚚 น้ำหนักรวมพ่วงตัวลูก (กก.)</label>
+          <input type="number" id="edit-td-trailer" class="form-input" placeholder="0.00" step="0.01" min="0">
+        </div>
+        <div class="form-group mb-3">
+          <label class="form-label" for="edit-td-target">🎯 เป้าหมายน้ำหนักทั้งคัน (กก.)</label>
+          <input type="number" id="edit-td-target" class="form-input" placeholder="0.00" step="100" min="0">
+        </div>
+      </div>
+      <div class="modal-footer" style="justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary" onclick="closeEditTruckDeliveryModal()">ยกเลิก</button>
+        <button class="btn btn-primary" onclick="saveEditTruckDelivery()">💾 บันทึกแก้ไขข้อมูลรถ</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== TRUCK MEMBERS DETAIL MODAL ===== -->
+  <div class="modal-overlay" id="truck-members-modal">
+    <div class="modal-content" style="max-width: 750px;">
+      <div class="modal-header">
+        <h3 id="truck-members-modal-title">🚛 รายการธุรกรรมสมาชิกที่จัดขึ้นรถพ่วง</h3>
+        <button class="modal-close" onclick="closeTruckMembersModal()">✕</button>
+      </div>
+      <div class="modal-body" id="truck-members-modal-body" style="max-height: 65vh; overflow-y: auto;">
+        <!-- Rendered dynamically -->
+      </div>
+      <div class="modal-footer" style="justify-content: flex-end;">
+        <button class="btn btn-secondary" onclick="closeTruckMembersModal()">ปิดหน้าต่าง</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== TRUCK DETAIL MODAL (ROUNDS SUMMARY) ===== -->
+  <div class="modal-overlay" id="truck-detail-modal">
+    <div class="modal-content" style="max-width: 750px;">
+      <div class="modal-header">
+        <h3 id="truck-detail-title">🚛 รายละเอียดธุรกรรมในรถ</h3>
+        <button class="modal-close" onclick="closeTruckDetailModal()">✕</button>
+      </div>
+      <div class="modal-body" id="truck-detail-body" style="max-height: 70vh; overflow-y: auto;"></div>
+      <div class="modal-footer" style="justify-content: flex-end;">
+        <button class="btn btn-secondary" onclick="closeTruckDetailModal()">ปิด</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SheetJS (XLSX) Client for Excel/CSV parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- Supabase JS Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="app.js"></script>
+</body>
+</html>
