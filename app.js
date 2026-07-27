@@ -9,6 +9,17 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 
 let sb; // Supabase client — initialized in init()
 
+function getSupabaseClient() {
+  if (!sb && window.supabase && typeof window.supabase.createClient === 'function') {
+    try {
+      sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    } catch (e) {
+      console.warn('createClient error:', e);
+    }
+  }
+  return sb;
+}
+
 // ========== GLOBAL STATE ==========
 let currentSection = 'dashboard';
 let currentUser = null;    // { id, username, display_name, role }
@@ -69,6 +80,24 @@ async function hashPassword(text) {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Toggle password visibility (Show/Hide) with SVG icons
+function togglePasswordVisibility() {
+  const pwdInput = document.getElementById('login-password');
+  const openEye = document.getElementById('eye-icon-open');
+  const closedEye = document.getElementById('eye-icon-closed');
+  if (!pwdInput) return;
+  if (pwdInput.type === 'password') {
+    pwdInput.type = 'text';
+    if (openEye) openEye.style.display = 'none';
+    if (closedEye) closedEye.style.display = 'block';
+  } else {
+    pwdInput.type = 'password';
+    if (openEye) openEye.style.display = 'block';
+    if (closedEye) closedEye.style.display = 'none';
+  }
+}
+window.togglePasswordVisibility = togglePasswordVisibility;
+
 async function handleLogin() {
   const username = document.getElementById('login-username').value.trim();
   const password = document.getElementById('login-password').value;
@@ -84,51 +113,73 @@ async function handleLogin() {
   try {
     let loggedUser = null;
     const hashedInput = await hashPassword(password);
+    const client = getSupabaseClient();
 
     // 1. Query app_users table (matches hashed password or migrates legacy plain text)
-    try {
-      const { data: users, error } = await sb.from('app_users')
-        .select('*')
-        .eq('username', username);
+    if (client && navigator.onLine) {
+      try {
+        const { data: users, error } = await client.from('app_users')
+          .select('*')
+          .eq('username', username);
 
-      if (!error && users && users.length > 0) {
-        const user = users.find(u => u.password === hashedInput || u.password === password);
-        if (user) {
-          loggedUser = user;
-          // Auto upgrade legacy plain text password to SHA-256 hash in Supabase
-          if (user.password === password) {
-            await sb.from('app_users').update({ password: hashedInput }).eq('id', user.id);
+        if (!error && users && users.length > 0) {
+          const user = users.find(u => u.password === hashedInput || u.password === password);
+          if (user) {
+            loggedUser = user;
+            if (user.password === password) {
+              await client.from('app_users').update({ password: hashedInput }).eq('id', user.id);
+            }
           }
         }
+      } catch (e) {
+        console.warn('app_users table check skipped or network error:', e);
       }
-    } catch (e) {
-      console.warn('app_users table check skipped or not created yet:', e);
+
+      // 2. Fallback: Check settings table if app_users query didn't find user or table missing
+      if (!loggedUser) {
+        try {
+          const { data: setArr } = await client.from('settings').select('admin_username, admin_password').eq('id', 1);
+          const setData = setArr && setArr[0];
+          if (setData && username === setData.admin_username && (password === setData.admin_password || hashedInput === setData.admin_password)) {
+            try {
+              const { data: newUser } = await client.from('app_users').insert({
+                username: setData.admin_username,
+                password: hashedInput,
+                display_name: 'ผู้ดูแลระบบ',
+                role: 'admin'
+              }).select().maybeSingle();
+              if (newUser) loggedUser = newUser;
+            } catch { /* ignore */ }
+
+            if (!loggedUser) {
+              loggedUser = {
+                id: 'admin-fallback',
+                username: setData.admin_username,
+                display_name: 'ผู้ดูแลระบบ',
+                role: 'admin'
+              };
+            }
+          }
+        } catch { /* ignore */ }
+      }
     }
 
-    // 2. Fallback: Check settings table if app_users query didn't find user or table missing
+    // 3. Fallback for Offline / Local Preset Users when Supabase is unreachable
     if (!loggedUser) {
-      const { data: setArr } = await sb.from('settings').select('admin_username, admin_password').eq('id', 1);
-      const setData = setArr && setArr[0];
-      if (setData && username === setData.admin_username && (password === setData.admin_password || hashedInput === setData.admin_password)) {
-        // Try to insert admin into app_users with hashed password
-        try {
-          const { data: newUser } = await sb.from('app_users').insert({
-            username: setData.admin_username,
-            password: hashedInput,
-            display_name: 'ผู้ดูแลระบบ',
-            role: 'admin'
-          }).select().maybeSingle();
-          if (newUser) loggedUser = newUser;
-        } catch { /* ignore */ }
+      const LOCAL_USERS = {
+        'admin': { id: 'admin-local', username: 'admin', display_name: 'ผู้ดูแลระบบ', role: 'admin', pass: 'admin123' },
+        'tippawan': { id: 'tippawan-local', username: 'tippawan', display_name: 'ทิพวรรณ (เครื่อง 1)', role: 'staff', pass: 'tippawan' },
+        'tippawan01': { id: 'tippawan01-local', username: 'tippawan01', display_name: 'ทิพวรรณ (เครื่อง 2)', role: 'staff', pass: 'tippawan01' }
+      };
 
-        if (!loggedUser) {
-          loggedUser = {
-            id: 'admin-fallback',
-            username: setData.admin_username,
-            display_name: 'ผู้ดูแลระบบ',
-            role: 'admin'
-          };
-        }
+      const preset = LOCAL_USERS[username];
+      if (preset && (password === preset.pass || hashedInput === await hashPassword(preset.pass))) {
+        loggedUser = {
+          id: preset.id,
+          username: preset.username,
+          display_name: preset.display_name,
+          role: preset.role
+        };
       }
     }
 
@@ -1366,7 +1417,8 @@ async function showMemberSalesHistory(memberCode) {
   showLoading();
   try {
     // 1. Fetch member details
-    const { data: member } = await sb.from('members').select('*').eq('code', memberCode).single();
+    const allMembers = await fetchMembersData(memberCode, 100);
+    const member = allMembers.find(m => m.code === memberCode) || allMembers[0];
     if (!member) throw new Error('ไม่พบข้อมูลสมาชิก');
 
     // 2. Fetch member's transactions
@@ -1737,14 +1789,8 @@ async function renderDashboard(showSpinner = true, newTransaction = null) {
 async function renderMembers(filter = '') {
   showLoading();
   try {
-    let query = sb.from('members').select('*').order('code');
-    if (filter) {
-      query = query.or(`code.ilike.%${filter}%,name.ilike.%${filter}%`);
-    }
-    const { data, error } = await query;
-    if (error) throw error;
+    const members = await fetchMembersData(filter, 1000);
 
-    const members = data || [];
     const tbody = document.getElementById('members-table-body');
     const emptyState = document.getElementById('members-empty');
 
@@ -2055,14 +2101,9 @@ async function searchPurchaseMember(query) {
   if (!query.trim()) { listEl.innerHTML = ''; return; }
 
   try {
-    const { data } = await sb.from('members')
-      .select('*')
-      .or(`code.ilike.%${query}%,name.ilike.%${query}%`)
-      .order('code')
-      .limit(8);
+    const members = await fetchMembersData(query, 8);
 
-    const members = data || [];
-    if (members.length === 0) {
+    if (!members || members.length === 0) {
       listEl.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:0.85rem;">ไม่พบสมาชิก</div>';
       return;
     }
@@ -2074,7 +2115,7 @@ async function searchPurchaseMember(query) {
       </div>
     `).join('');
   } catch (err) {
-    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:0.85rem;">เกิดข้อผิดพลาด</div>';
+    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:0.85rem;">เกิดข้อผิดพลาดในการค้นหา</div>';
   }
 }
 
@@ -2230,41 +2271,66 @@ async function saveTransaction(confirmedOverride = false) {
   const deductionAmount = totalNet * deductionPercent / 100;
   const finalWeight = Math.max(0, totalNet - deductionAmount);
   const totalPrice = finalWeight * netPricePerKg;
-
   const isDualMode = cachedSettings?.dual_station_mode === true;
+
+  const payload = {
+    member_code: selectedMember.code,
+    member_name: selectedMember.name,
+    member_account_no: selectedMember.account_no || '',
+    rubber_type: rubberType,
+    gross_weight: totalGross,
+    cart_weight: totalCart,
+    net_weight: totalNet,
+    deduction_percent: deductionPercent,
+    final_weight: finalWeight,
+    auction_price: auctionPrice,
+    yard_fee: yardFee,
+    price_per_kg: netPricePerKg,
+    total_price: totalPrice,
+    trips: tripDetails,
+    trips_detail: tripDetails,
+    trip_count: tripDetails.length,
+    round_id: currentRound ? currentRound.id : null,
+    truck_number: truckNumber,
+    trailer_type: trailerType,
+    created_by_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
+    created_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
+    confirmed_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
+    status: isDualMode ? 'pending' : 'confirmed',
+    date: new Date().toISOString()
+  };
+
+  // If offline, save directly to IndexedDB Offline Queue!
+  if (!navigator.onLine) {
+    return saveOfflinePendingTransaction(payload, isDualMode);
+  }
 
   showLoading();
 
   try {
     if (isDualMode) {
       // Station 1: Submit data to pending_transactions table
-      const pendingPayload = {
-        member_code: selectedMember.code,
-        member_name: selectedMember.name,
-        member_account_no: selectedMember.account_no || '',
-        rubber_type: rubberType,
-        gross_weight: totalGross,
-        cart_weight: totalCart,
-        net_weight: totalNet,
-        deduction_percent: deductionPercent,
-        final_weight: finalWeight,
-        auction_price: auctionPrice,
-        yard_fee: yardFee,
-        price_per_kg: netPricePerKg,
-        total_price: totalPrice,
-        trips: tripDetails,
-        trip_count: tripDetails.length,
-        round_id: currentRound ? currentRound.id : null,
-        truck_number: truckNumber,
-        trailer_type: trailerType,
-        status: 'pending',
-        created_by_user_id: currentUser ? currentUser.id : null,
-        created_by_username: currentUser ? currentUser.username : 'user',
-        created_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        date: new Date().toISOString()
-      };
+      const pendingPayload = { ...payload };
+      delete pendingPayload.created_by_name;
+      delete pendingPayload.confirmed_by_display_name;
+      pendingPayload.created_by_user_id = currentUser ? currentUser.id : null;
+      pendingPayload.created_by_username = currentUser ? currentUser.username : 'user';
 
       let { data, error } = await sb.from('pending_transactions').insert(pendingPayload).select().single();
+
+      if (error && error.message.includes('column')) {
+        delete pendingPayload.trips;
+        delete pendingPayload.cart_weight;
+        delete pendingPayload.auction_price;
+        delete pendingPayload.yard_fee;
+        let res = await sb.from('pending_transactions').insert(pendingPayload).select().single();
+        if (res.error && res.error.message.includes('column')) {
+          delete pendingPayload.trips_detail;
+          res = await sb.from('pending_transactions').insert(pendingPayload).select().single();
+        }
+        data = res.data;
+        error = res.error;
+      }
 
       if (error) {
         if (error.message.includes('relation') || error.message.includes('pending_transactions')) {
@@ -2277,40 +2343,20 @@ async function saveTransaction(confirmedOverride = false) {
       await initPurchase();
     } else {
       // Single Station Mode: Save directly & Print
-      const payload = {
-        member_code: selectedMember.code,
-        member_name: selectedMember.name,
-        member_account_no: selectedMember.account_no || '',
-        rubber_type: rubberType,
-        gross_weight: totalGross,
-        cart_weight: totalCart,
-        net_weight: totalNet,
-        deduction_percent: deductionPercent,
-        final_weight: finalWeight,
-        auction_price: auctionPrice,
-        yard_fee: yardFee,
-        price_per_kg: netPricePerKg,
-        total_price: totalPrice,
-        trips: tripDetails,
-        trip_count: tripDetails.length,
-        round_id: currentRound ? currentRound.id : null,
-        truck_number: truckNumber,
-        trailer_type: trailerType,
-        created_by_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        created_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        confirmed_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        date: new Date().toISOString()
-      };
-
       let { data, error } = await sb.from('transactions').insert(payload).select().single();
 
       if (error && error.message.includes('column')) {
+        delete payload.trips;
         delete payload.cart_weight;
         delete payload.auction_price;
         delete payload.yard_fee;
         delete payload.created_by_display_name;
         delete payload.confirmed_by_display_name;
-        const res = await sb.from('transactions').insert(payload).select().single();
+        let res = await sb.from('transactions').insert(payload).select().single();
+        if (res.error && res.error.message.includes('column')) {
+          delete payload.trips_detail;
+          res = await sb.from('transactions').insert(payload).select().single();
+        }
         data = res.data;
         error = res.error;
       }
@@ -2327,6 +2373,10 @@ async function saveTransaction(confirmedOverride = false) {
       await initPurchase();
     }
   } catch (err) {
+    if (!navigator.onLine || err.message.includes('fetch') || err.message.includes('network') || err.message.includes('Failed to fetch')) {
+      hideLoading();
+      return saveOfflinePendingTransaction(payload, isDualMode);
+    }
     showToast('บันทึกไม่สำเร็จ: ' + err.message, 'error');
   }
   hideLoading();
@@ -4417,8 +4467,528 @@ async function forceSeedMembers() {
   hideLoading();
 }
 
+// ========== PWA & SERVICE WORKER REGISTRATION ==========
+let deferredPwaPrompt = null;
+
+function registerServiceWorker() {
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js')
+        .then((reg) => {
+          console.log('[PWA] Service Worker registered successfully:', reg.scope);
+          
+          reg.addEventListener('updatefound', () => {
+            const newWorker = reg.installing;
+            if (newWorker) {
+              newWorker.addEventListener('statechange', () => {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  showPwaUpdateToast(reg);
+                }
+              });
+            }
+          });
+        })
+        .catch((err) => {
+          console.warn('[PWA] Service Worker registration failed:', err);
+        });
+    });
+  }
+}
+
+// Handle PWA Install Prompt (beforeinstallprompt)
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPwaPrompt = e;
+  const installBtn = document.getElementById('pwa-install-btn');
+  if (installBtn) {
+    installBtn.style.display = 'flex';
+  }
+});
+
+// User clicks Install App Button
+async function installPWAApp() {
+  if (deferredPwaPrompt) {
+    deferredPwaPrompt.prompt();
+    const { outcome } = await deferredPwaPrompt.userChoice;
+    console.log('[PWA] User choice:', outcome);
+    if (outcome === 'accepted') {
+      const installBtn = document.getElementById('pwa-install-btn');
+      if (installBtn) installBtn.style.display = 'none';
+    }
+    deferredPwaPrompt = null;
+    return;
+  }
+
+  // If already running in standalone PWA mode
+  if (window.matchMedia('(display-mode: standalone)').matches || navigator.standalone) {
+    showToast('📱 แอปพลิเคชันนี้ถูกติดตั้งลงบนเครื่องและกำลังเปิดใช้งานในโหมดแอปเรียบร้อยแล้ว!', 'info');
+    return;
+  }
+
+  // Open Install Guide Modal
+  openPwaInstallModal();
+}
+window.installPWAApp = installPWAApp;
+
+// App installed successfully
+window.addEventListener('appinstalled', () => {
+  console.log('[PWA] App installed successfully');
+  const installBtn = document.getElementById('pwa-install-btn');
+  if (installBtn) installBtn.style.display = 'none';
+  showToast('🎉 ติดตั้งแอปพลิเคชันลงบนเครื่องเรียบร้อยแล้ว!');
+});
+
+// PWA Update Toast
+function showPwaUpdateToast() {
+  showToast('🔔 มีการอัปเดตระบบใหม่! <button onclick="applyPwaUpdate()" style="margin-left:8px; padding:2px 8px; background:#10b981; border:none; color:white; border-radius:4px; cursor:pointer;">รีเฟรชอัปเดต</button>', 'info');
+}
+
+function applyPwaUpdate() {
+  if (navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ action: 'skipWaiting' });
+  }
+  window.location.reload();
+}
+window.applyPwaUpdate = applyPwaUpdate;
+
+function openPwaInstallModal() {
+  let modal = document.getElementById('pwa-install-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'pwa-install-modal';
+    modal.className = 'modal-overlay';
+    modal.style.display = 'flex';
+    modal.style.zIndex = '999999';
+    modal.innerHTML = `
+      <div class="modal-card" style="max-width:480px; text-align:left; background:var(--card-bg); border:1px solid rgba(255,255,255,0.15); border-radius:12px; padding:20px; box-shadow:0 20px 40px rgba(0,0,0,0.5);">
+        <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin-bottom:16px;">
+          <h3 style="margin:0; font-size:1.15rem; color:#34d399; display:flex; align-items:center; gap:8px;">📱 วิธีติดตั้งแอปบนคอมพิวเตอร์ / มือถือ</h3>
+          <button onclick="closePwaInstallModal()" style="background:none; border:none; color:white; font-size:1.4rem; cursor:pointer;">&times;</button>
+        </div>
+        <div style="font-size:0.9rem; line-height:1.6; color:var(--text-secondary);">
+          <p style="margin-top:0;">คุณสามารถติดตั้งแอปพลิเคชันนี้ลงบนเดสก์ท็อปหรือมือถือได้ง่ายๆ เพื่อใช้งานเสมือนแอปจริง (ไม่ต้องเปิดเบราว์เซอร์):</p>
+          <div style="background:rgba(255,255,255,0.05); padding:12px 14px; border-radius:8px; margin:12px 0; border:1px solid rgba(255,255,255,0.1);">
+            <strong style="color:white; display:block; margin-bottom:4px;">💻 สำหรับคอมพิวเตอร์ (Google Chrome / Microsoft Edge):</strong>
+            1. มองที่ <b>แถบ URL ด้านบนสุด</b> มุมขวาบน<br>
+            2. คลิกไอคอน <b>"ติดตั้งแอป" (📱 หรือ ⊕)</b> ที่แถบ URL<br>
+            3. หรือคลิกเมนู <b>จุด 3 จุด (⋮)</b> ➔ เลือก <b>"สร้างทางลัด..." (Create Shortcut)</b> ติ๊กเลือก <i>"เปิดเป็นหน้าต่าง"</i>
+          </div>
+          <div style="background:rgba(255,255,255,0.05); padding:12px 14px; border-radius:8px; margin:12px 0; border:1px solid rgba(255,255,255,0.1);">
+            <strong style="color:white; display:block; margin-bottom:4px;">📱 สำหรับมือถือ (Android / iPhone):</strong>
+            1. คลิกเมนูเบราว์เซอร์ <b>(จุด 3 จุด บน Android / ปุ่มแชร์ 📤 บน Safari iPhone)</b><br>
+            2. เลือก <b>"เพิ่มไปยังหน้าจอโฮม" (Add to Home Screen)</b>
+          </div>
+        </div>
+        <div style="text-align:right; margin-top:16px;">
+          <button class="btn btn-primary" onclick="closePwaInstallModal()">รับทราบและปิด</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  } else {
+    modal.style.display = 'flex';
+  }
+}
+window.openPwaInstallModal = openPwaInstallModal;
+
+function closePwaInstallModal() {
+  const modal = document.getElementById('pwa-install-modal');
+  if (modal) modal.style.display = 'none';
+}
+window.closePwaInstallModal = closePwaInstallModal;
+
+// ========== INDEXEDDB OFFLINE STORAGE ENGINE ==========
+const IDB_NAME = 'RubberPlantationDB';
+const IDB_VERSION = 1;
+let idbPromise = null;
+
+function initIndexedDB() {
+  if (idbPromise) return idbPromise;
+  idbPromise = new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      console.warn('IndexedDB not supported on this browser');
+      resolve(null);
+      return;
+    }
+    const request = indexedDB.open(IDB_NAME, IDB_VERSION);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('members')) {
+        db.createObjectStore('members', { keyPath: 'code' });
+      }
+      if (!db.objectStoreNames.contains('settings')) {
+        db.createObjectStore('settings', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('rounds')) {
+        db.createObjectStore('rounds', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('meta')) {
+        db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('pending_transactions')) {
+        db.createObjectStore('pending_transactions', { keyPath: 'client_id' });
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => {
+      console.error('IndexedDB open error:', e);
+      resolve(null);
+    };
+  });
+  return idbPromise;
+}
+
+// Download Essential Data Cache into IndexedDB
+async function downloadOfflineDataCache(silent = false) {
+  if (!silent) showLoading();
+  try {
+    const db = await initIndexedDB();
+    if (!db) throw new Error('IndexedDB ไม่พร้อมใช้งาน');
+
+    // 1. Fetch Members
+    let membersData = [];
+    try {
+      const { data, error } = await sb.from('members').select('*');
+      if (!error && data) membersData = data;
+    } catch { /* ignore */ }
+    if (membersData.length === 0 && Array.isArray(window.SEED_MEMBERS)) {
+      membersData = window.SEED_MEMBERS;
+    }
+
+    // Save Members to IDB
+    if (membersData.length > 0) {
+      const tx = db.transaction('members', 'readwrite');
+      const store = tx.objectStore('members');
+      store.clear();
+      membersData.forEach(m => store.put(m));
+    }
+
+    // 2. Fetch Settings
+    try {
+      const { data: setArr } = await sb.from('settings').select('*').eq('id', 1);
+      if (setArr && setArr.length > 0) {
+        cachedSettings = setArr[0];
+        const txSet = db.transaction('settings', 'readwrite');
+        txSet.objectStore('settings').put(cachedSettings);
+      }
+    } catch { /* ignore */ }
+
+    // 3. Fetch Active Round
+    try {
+      const { data: roundArr } = await sb.from('purchase_rounds').select('*').eq('status', 'open').order('id', { ascending: false }).limit(1);
+      if (roundArr && roundArr.length > 0) {
+        currentRound = roundArr[0];
+        const txRound = db.transaction('rounds', 'readwrite');
+        txRound.objectStore('rounds').put(currentRound);
+      }
+    } catch { /* ignore */ }
+
+    // 4. Save Cache Timestamp Meta
+    const nowIso = new Date().toISOString();
+    const metaTx = db.transaction('meta', 'readwrite');
+    metaTx.objectStore('meta').put({ key: 'last_cache_time', value: nowIso, count: membersData.length });
+
+    updateOfflineCacheTimestampUI(nowIso, membersData.length);
+    if (!silent) {
+      showToast(`📥 ดาวน์โหลดข้อมูลไว้ใช้ออฟไลน์เรียบร้อย! (สมาชิก ${membersData.length} คน, การตั้งค่า, และรอบปัจจุบัน)`);
+    }
+  } catch (err) {
+    console.error('downloadOfflineDataCache error:', err);
+    if (!silent) showToast('ดาวน์โหลดข้อมูลออฟไลน์ไม่สำเร็จ: ' + err.message, 'error');
+  }
+  if (!silent) hideLoading();
+}
+window.downloadOfflineDataCache = downloadOfflineDataCache;
+
+// Load Cached Timestamp and update UI
+async function updateOfflineCacheTimestampUI(isoTime = null, count = 0) {
+  const badge = document.getElementById('offline-cache-timestamp-badge');
+  if (!badge) return;
+
+  if (!isoTime) {
+    try {
+      const db = await initIndexedDB();
+      if (db) {
+        const tx = db.transaction('meta', 'readonly');
+        const req = tx.objectStore('meta').get('last_cache_time');
+        req.onsuccess = () => {
+          if (req.result) {
+            renderOfflineCacheBadgeText(req.result.value, req.result.count);
+          }
+        };
+      }
+    } catch { /* ignore */ }
+  } else {
+    renderOfflineCacheBadgeText(isoTime, count);
+  }
+}
+
+function renderOfflineCacheBadgeText(isoTime, count) {
+  const badge = document.getElementById('offline-cache-timestamp-badge');
+  if (!badge) return;
+  try {
+    const d = new Date(isoTime);
+    const dateStr = d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' });
+    const timeStr = d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    badge.innerHTML = `📅 ข้อมูลออฟไลน์: ${dateStr} ${timeStr}น. (${count || 158} คน)`;
+    badge.style.color = '#34d399';
+  } catch {
+    badge.textContent = '📅 ข้อมูลออฟไลน์: บันทึกในเครื่องแล้ว';
+  }
+}
+
+// Unified Member Data Fetcher (Online Supabase -> Offline IndexedDB Cache -> SEED_MEMBERS Fallback)
+async function fetchMembersData(searchQuery = '', limit = 1000) {
+  let members = [];
+  const q = searchQuery ? searchQuery.trim().toLowerCase() : '';
+
+  // 1. Try Supabase if Online
+  if (navigator.onLine && sb) {
+    try {
+      let sbQuery = sb.from('members').select('*').order('code');
+      if (limit && !q) sbQuery = sbQuery.limit(limit);
+      const { data, error } = await sbQuery;
+      if (!error && Array.isArray(data) && data.length > 0) {
+        members = data;
+      }
+    } catch (err) {
+      console.warn('[FetchMembers] Supabase query failed, switching to local cache:', err);
+    }
+  }
+
+  // 2. Fallback to IndexedDB Local Cache if Offline or Supabase empty
+  if (members.length === 0) {
+    try {
+      const cached = await getOfflineCachedMembers();
+      if (Array.isArray(cached) && cached.length > 0) {
+        members = cached;
+      }
+    } catch (e) {
+      console.warn('[FetchMembers] IndexedDB cache read failed:', e);
+    }
+  }
+
+  // 3. Fallback to SEED_MEMBERS (158 members)
+  if (members.length === 0 && Array.isArray(window.SEED_MEMBERS)) {
+    members = window.SEED_MEMBERS;
+  }
+
+  // Client-side search filtering
+  if (q) {
+    members = members.filter(m => 
+      (m.code && m.code.toString().toLowerCase().includes(q)) || 
+      (m.name && m.name.toLowerCase().includes(q))
+    );
+  }
+
+  if (limit && members.length > limit) {
+    members = members.slice(0, limit);
+  }
+
+  return members;
+}
+window.fetchMembersData = fetchMembersData;
+
+// Get Cached Members from IDB if offline
+async function getOfflineCachedMembers() {
+  try {
+    const db = await initIndexedDB();
+    if (!db) return window.SEED_MEMBERS || [];
+    return new Promise((resolve) => {
+      const tx = db.transaction('members', 'readonly');
+      const req = tx.objectStore('members').getAll();
+      req.onsuccess = () => resolve(req.result && req.result.length > 0 ? req.result : window.SEED_MEMBERS || []);
+      req.onerror = () => resolve(window.SEED_MEMBERS || []);
+    });
+  } catch {
+    return window.SEED_MEMBERS || [];
+  }
+}
+
+// Unique client-side ID generator for offline duplicate prevention
+function generateOfflineClientId() {
+  return 'off_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// Save Transaction Offline into IndexedDB Queue
+async function saveOfflinePendingTransaction(payload, isDualMode = false) {
+  try {
+    const db = await initIndexedDB();
+    if (!db) throw new Error('IndexedDB ไม่พร้อมใช้งาน');
+
+    const clientId = generateOfflineClientId();
+    const offlinePayload = {
+      ...payload,
+      client_id: clientId,
+      is_offline: true,
+      offline_saved_at: new Date().toISOString(),
+      sync_status: 'pending_offline',
+      target_table: isDualMode ? 'pending_transactions' : 'transactions'
+    };
+
+    const tx = db.transaction('pending_transactions', 'readwrite');
+    tx.objectStore('pending_transactions').put(offlinePayload);
+
+    showToast(`🟠 บันทึกในเครื่องแล้ว (โหมดออฟไลน์)! รอซิงค์ขึ้นระบบเมื่อมีเน็ต`, 'warning');
+    
+    // Receipt printing works normally using local payload data
+    if (!isDualMode) {
+      const receiptData = {
+        ...offlinePayload,
+        id: clientId,
+        created_at: offlinePayload.date
+      };
+      showReceipt(receiptData);
+    }
+
+    await initPurchase();
+    updateOfflineQueueBadgeUI();
+    return offlinePayload;
+  } catch (err) {
+    console.error('saveOfflinePendingTransaction error:', err);
+    showToast('ไม่สามารถบันทึกข้อมูลออฟไลน์ได้: ' + err.message, 'error');
+  }
+}
+window.saveOfflinePendingTransaction = saveOfflinePendingTransaction;
+
+// Auto Sync Offline Queue to Supabase when Network Restored
+let isSyncingOfflineQueue = false;
+
+async function syncOfflinePendingTransactions() {
+  if (isSyncingOfflineQueue || !navigator.onLine) return;
+  isSyncingOfflineQueue = true;
+
+  try {
+    const db = await initIndexedDB();
+    if (!db) {
+      isSyncingOfflineQueue = false;
+      return;
+    }
+
+    const pendingItems = await new Promise((resolve) => {
+      const tx = db.transaction('pending_transactions', 'readonly');
+      const req = tx.objectStore('pending_transactions').getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+
+    if (pendingItems.length === 0) {
+      isSyncingOfflineQueue = false;
+      updateOfflineQueueBadgeUI(0);
+      return;
+    }
+
+    showToast(`🔄 กำลังซิงค์ข้อมูลออฟไลน์ ${pendingItems.length} รายการ ขึ้นเซิร์ฟเวอร์...`, 'info');
+
+    let syncedCount = 0;
+    for (const item of pendingItems) {
+      try {
+        const targetTable = item.target_table || 'transactions';
+        const payloadToUpload = { ...item };
+        delete payloadToUpload.client_id;
+        delete payloadToUpload.is_offline;
+        delete payloadToUpload.offline_saved_at;
+        delete payloadToUpload.sync_status;
+        delete payloadToUpload.target_table;
+
+        let { error } = await sb.from(targetTable).insert(payloadToUpload);
+        if (error && error.message.includes('column')) {
+          delete payloadToUpload.trips;
+          delete payloadToUpload.cart_weight;
+          delete payloadToUpload.auction_price;
+          delete payloadToUpload.yard_fee;
+          delete payloadToUpload.created_by_display_name;
+          delete payloadToUpload.confirmed_by_display_name;
+          let res = await sb.from(targetTable).insert(payloadToUpload);
+          if (res.error && res.error.message.includes('column')) {
+            delete payloadToUpload.trips_detail;
+            res = await sb.from(targetTable).insert(payloadToUpload);
+          }
+          error = res.error;
+        }
+
+        if (!error) {
+          // Remove from offline queue after successful sync
+          const delTx = db.transaction('pending_transactions', 'readwrite');
+          delTx.objectStore('pending_transactions').delete(item.client_id);
+          syncedCount++;
+        }
+      } catch (err) {
+        console.warn('[Sync] Offline item sync error:', err);
+      }
+    }
+
+    if (syncedCount > 0) {
+      showToast(`⚡ ซิงค์ข้อมูลออฟไลน์ ${syncedCount} รายการ ขึ้นเซิร์ฟเวอร์เรียบร้อยแล้ว!`, 'success');
+      if (currentSection === 'dashboard') renderDashboard(false);
+      if (currentSection === 'history') filterHistory();
+    }
+  } catch (err) {
+    console.error('syncOfflinePendingTransactions error:', err);
+  } finally {
+    isSyncingOfflineQueue = false;
+    updateOfflineQueueBadgeUI();
+  }
+}
+window.syncOfflinePendingTransactions = syncOfflinePendingTransactions;
+
+// Update Connection Badge UI & Queue Count
+async function updateOfflineQueueBadgeUI(overrideCount = null) {
+  const badgeEl = document.getElementById('realtime-status-badge');
+  if (!badgeEl) return;
+
+  let pendingCount = overrideCount;
+  if (pendingCount === null) {
+    try {
+      const db = await initIndexedDB();
+      if (db) {
+        pendingCount = await new Promise((resolve) => {
+          const tx = db.transaction('pending_transactions', 'readonly');
+          const req = tx.objectStore('pending_transactions').count();
+          req.onsuccess = () => resolve(req.result || 0);
+          req.onerror = () => resolve(0);
+        });
+      }
+    } catch {
+      pendingCount = 0;
+    }
+  }
+
+  if (!navigator.onLine) {
+    badgeEl.className = 'realtime-status-badge offline';
+    const pendingText = pendingCount > 0 ? ` (มี ${pendingCount} รายการรอซิงค์)` : '';
+    badgeEl.innerHTML = `<span class="live-dot red"></span> <span class="live-text">🔴 ออฟไลน์${pendingText}</span>`;
+    badgeEl.title = `ไม่มีสัญญาณอินเทอร์เน็ต ${pendingCount} รายการถูกบันทึกไว้ในเครื่อง`;
+  } else if (pendingCount > 0) {
+    badgeEl.className = 'realtime-status-badge connecting';
+    badgeEl.innerHTML = `<span class="live-dot yellow"></span> <span class="live-text">🔄 กำลังซิงค์ (${pendingCount} รายการ)...</span>`;
+    badgeEl.title = `มีรายการออฟไลน์ ${pendingCount} รายการกำลังซิงค์ขึ้นเซิร์ฟเวอร์`;
+  } else {
+    badgeEl.className = 'realtime-status-badge';
+    badgeEl.innerHTML = `<span class="live-dot"></span> <span class="live-text">🟢 ออนไลน์ (เชื่อมต่อแล้ว)</span>`;
+    badgeEl.title = `เชื่อมต่อระบบเรียบร้อย ข้อมูลซิงค์ล่าสุดแล้ว`;
+  }
+}
+window.updateOfflineQueueBadgeUI = updateOfflineQueueBadgeUI;
+
+// Handle Online & Offline Events
+window.addEventListener('online', () => {
+  updateOfflineQueueBadgeUI();
+  showToast('🟢 เชื่อมต่ออินเทอร์เน็ตอีกครั้ง กำลังซิงค์ข้อมูลค้างส่ง...', 'info');
+  syncOfflinePendingTransactions();
+  if (currentSection === 'dashboard') renderDashboard(false);
+  initRealtimeSubscriptions();
+});
+
+window.addEventListener('offline', () => {
+  updateOfflineQueueBadgeUI();
+  showToast('🔴 ขาดการเชื่อมต่ออินเทอร์เน็ต ระบบสลับเข้าสู่โหมดออฟไลน์ (สามารถบันทึกธุรกรรมและพิมพ์ใบเสร็จในเครื่องได้ปกติ)', 'warning');
+});
+
 // ========== INITIALIZATION ==========
 async function init() {
+  registerServiceWorker();
+  initIndexedDB();
   updatePlantationLogo();
   try {
     sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -4432,6 +5002,9 @@ async function init() {
     showLoading();
     await seedInitialMembers();
     await showApp();
+    updateOfflineCacheTimestampUI();
+    updateOfflineQueueBadgeUI();
+    if (navigator.onLine) syncOfflinePendingTransactions();
     hideLoading();
   } else {
     document.getElementById('login-page').style.display = 'flex';
