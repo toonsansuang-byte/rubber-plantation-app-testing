@@ -5600,6 +5600,15 @@ async function saveOfflinePendingTransaction(payload, isDualMode = false) {
     const tx = db.transaction('pending_transactions', 'readwrite');
     tx.objectStore('pending_transactions').put(offlinePayload);
 
+    // Save to IDB transactions cache store for local-first reading
+    try {
+      const txCache = db.transaction('transactions', 'readwrite');
+      txCache.objectStore('transactions').put({
+        ...offlinePayload,
+        id: clientId
+      });
+    } catch {}
+
     showToast(`🟠 บันทึกในเครื่องแล้ว (โหมดออฟไลน์)! รอซิงค์ขึ้นระบบเมื่อมีเน็ต`, 'warning');
     
     // Receipt printing works normally using local payload data
