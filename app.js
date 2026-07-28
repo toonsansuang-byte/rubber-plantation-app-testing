@@ -9,6 +9,17 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 
 let sb; // Supabase client — initialized in init()
 
+function getSupabaseClient() {
+  if (!sb && window.supabase && typeof window.supabase.createClient === 'function') {
+    try {
+      sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    } catch (e) {
+      console.warn('createClient error:', e);
+    }
+  }
+  return sb;
+}
+
 // ========== GLOBAL STATE ==========
 let currentSection = 'dashboard';
 let currentUser = null;    // { id, username, display_name, role }
@@ -47,17 +58,52 @@ function showToast(message, type = 'success') {
 
 // ========== AUTH & USER SESSION ==========
 function checkAuth() {
+  // 1. Check sessionStorage (active tab)
   const isLogged = sessionStorage.getItem('rb_session') === 'logged_in';
   const storedUser = sessionStorage.getItem('rb_user');
   if (isLogged && storedUser) {
     try {
       currentUser = JSON.parse(storedUser);
       return true;
+    } catch { /* ignore */ }
+  }
+
+  // 2. Check persistent localStorage offline session (valid for 30 days)
+  const offlineSessionStr = localStorage.getItem('rb_offline_user_session');
+  if (offlineSessionStr) {
+    try {
+      const session = JSON.parse(offlineSessionStr);
+      if (session && session.user && session.expires_at && session.expires_at > Date.now()) {
+        currentUser = session.user;
+        sessionStorage.setItem('rb_session', 'logged_in');
+        sessionStorage.setItem('rb_user', JSON.stringify(currentUser));
+        return true;
+      } else {
+        localStorage.removeItem('rb_offline_user_session');
+      }
     } catch {
-      return false;
+      localStorage.removeItem('rb_offline_user_session');
     }
   }
+
   return false;
+}
+
+// Silent Re-validation when Online
+async function silentValidateSession() {
+  if (!navigator.onLine || !currentUser || !sb) return;
+  try {
+    const { data: users } = await sb.from('app_users').select('id, username, display_name, role').eq('username', currentUser.username);
+    if (users && users.length > 0) {
+      currentUser.display_name = users[0].display_name;
+      currentUser.role = users[0].role;
+      sessionStorage.setItem('rb_user', JSON.stringify(currentUser));
+      localStorage.setItem('rb_offline_user_session', JSON.stringify({
+        user: currentUser,
+        expires_at: Date.now() + (30 * 24 * 60 * 60 * 1000)
+      }));
+    }
+  } catch { /* ignore */ }
 }
 
 // ========== PASSWORD HASHING (WEB CRYPTO SHA-256) ==========
@@ -68,6 +114,24 @@ async function hashPassword(text) {
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
+
+// Toggle password visibility (Show/Hide) with SVG icons
+function togglePasswordVisibility() {
+  const pwdInput = document.getElementById('login-password');
+  const openEye = document.getElementById('eye-icon-open');
+  const closedEye = document.getElementById('eye-icon-closed');
+  if (!pwdInput) return;
+  if (pwdInput.type === 'password') {
+    pwdInput.type = 'text';
+    if (openEye) openEye.style.display = 'none';
+    if (closedEye) closedEye.style.display = 'block';
+  } else {
+    pwdInput.type = 'password';
+    if (openEye) openEye.style.display = 'block';
+    if (closedEye) closedEye.style.display = 'none';
+  }
+}
+window.togglePasswordVisibility = togglePasswordVisibility;
 
 async function handleLogin() {
   const username = document.getElementById('login-username').value.trim();
@@ -84,51 +148,73 @@ async function handleLogin() {
   try {
     let loggedUser = null;
     const hashedInput = await hashPassword(password);
+    const client = getSupabaseClient();
 
     // 1. Query app_users table (matches hashed password or migrates legacy plain text)
-    try {
-      const { data: users, error } = await sb.from('app_users')
-        .select('*')
-        .eq('username', username);
+    if (client && navigator.onLine) {
+      try {
+        const { data: users, error } = await client.from('app_users')
+          .select('*')
+          .eq('username', username);
 
-      if (!error && users && users.length > 0) {
-        const user = users.find(u => u.password === hashedInput || u.password === password);
-        if (user) {
-          loggedUser = user;
-          // Auto upgrade legacy plain text password to SHA-256 hash in Supabase
-          if (user.password === password) {
-            await sb.from('app_users').update({ password: hashedInput }).eq('id', user.id);
+        if (!error && users && users.length > 0) {
+          const user = users.find(u => u.password === hashedInput || u.password === password);
+          if (user) {
+            loggedUser = user;
+            if (user.password === password) {
+              await client.from('app_users').update({ password: hashedInput }).eq('id', user.id);
+            }
           }
         }
+      } catch (e) {
+        console.warn('app_users table check skipped or network error:', e);
       }
-    } catch (e) {
-      console.warn('app_users table check skipped or not created yet:', e);
+
+      // 2. Fallback: Check settings table if app_users query didn't find user or table missing
+      if (!loggedUser) {
+        try {
+          const { data: setArr } = await client.from('settings').select('admin_username, admin_password').eq('id', 1);
+          const setData = setArr && setArr[0];
+          if (setData && username === setData.admin_username && (password === setData.admin_password || hashedInput === setData.admin_password)) {
+            try {
+              const { data: newUser } = await client.from('app_users').insert({
+                username: setData.admin_username,
+                password: hashedInput,
+                display_name: 'ผู้ดูแลระบบ',
+                role: 'admin'
+              }).select().maybeSingle();
+              if (newUser) loggedUser = newUser;
+            } catch { /* ignore */ }
+
+            if (!loggedUser) {
+              loggedUser = {
+                id: 'admin-fallback',
+                username: setData.admin_username,
+                display_name: 'ผู้ดูแลระบบ',
+                role: 'admin'
+              };
+            }
+          }
+        } catch { /* ignore */ }
+      }
     }
 
-    // 2. Fallback: Check settings table if app_users query didn't find user or table missing
+    // 3. Fallback for Offline / Local Preset Users when Supabase is unreachable
     if (!loggedUser) {
-      const { data: setArr } = await sb.from('settings').select('admin_username, admin_password').eq('id', 1);
-      const setData = setArr && setArr[0];
-      if (setData && username === setData.admin_username && (password === setData.admin_password || hashedInput === setData.admin_password)) {
-        // Try to insert admin into app_users with hashed password
-        try {
-          const { data: newUser } = await sb.from('app_users').insert({
-            username: setData.admin_username,
-            password: hashedInput,
-            display_name: 'ผู้ดูแลระบบ',
-            role: 'admin'
-          }).select().maybeSingle();
-          if (newUser) loggedUser = newUser;
-        } catch { /* ignore */ }
+      const LOCAL_USERS = {
+        'admin': { id: 'admin-local', username: 'admin', display_name: 'ผู้ดูแลระบบ', role: 'admin', pass: 'admin123' },
+        'tippawan': { id: 'tippawan-local', username: 'tippawan', display_name: 'ทิพวรรณ (เครื่อง 1)', role: 'staff', pass: 'tippawan' },
+        'tippawan01': { id: 'tippawan01-local', username: 'tippawan01', display_name: 'ทิพวรรณ (เครื่อง 2)', role: 'staff', pass: 'tippawan01' }
+      };
 
-        if (!loggedUser) {
-          loggedUser = {
-            id: 'admin-fallback',
-            username: setData.admin_username,
-            display_name: 'ผู้ดูแลระบบ',
-            role: 'admin'
-          };
-        }
+      const preset = LOCAL_USERS[username];
+      if (preset && (password === preset.pass || hashedInput === await hashPassword(preset.pass))) {
+        loggedUser = {
+          id: preset.id,
+          username: preset.username,
+          display_name: preset.display_name,
+          role: preset.role
+        };
       }
     }
 
@@ -139,17 +225,32 @@ async function handleLogin() {
         display_name: loggedUser.display_name,
         role: loggedUser.role
       };
+      
+      const sessionExpiry = Date.now() + (30 * 24 * 60 * 60 * 1000); // 30 days
       sessionStorage.setItem('rb_session', 'logged_in');
       sessionStorage.setItem('rb_user', JSON.stringify(currentUser));
+      localStorage.setItem('rb_offline_user_session', JSON.stringify({
+        user: currentUser,
+        expires_at: sessionExpiry
+      }));
+
       errorEl.classList.remove('show');
       await showApp();
       showToast(`ยินดีต้อนรับ คุณ${currentUser.display_name}!`);
     } else {
-      errorEl.textContent = 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง';
+      if (!navigator.onLine) {
+        errorEl.textContent = '❌ ต้องเชื่อมต่ออินเทอร์เน็ตเพื่อเข้าสู่ระบบครั้งแรกในเครื่องนี้ (หรือใช้บัญชี admin / admin123)';
+      } else {
+        errorEl.textContent = 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง';
+      }
       errorEl.classList.add('show');
     }
   } catch (err) {
-    errorEl.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อ: ' + (err.message || err);
+    if (!navigator.onLine) {
+      errorEl.textContent = '❌ ต้องเชื่อมต่ออินเทอร์เน็ตเพื่อเข้าสู่ระบบครั้งแรกในเครื่องนี้ (หรือใช้บัญชี admin / admin123)';
+    } else {
+      errorEl.textContent = 'เกิดข้อผิดพลาดในการเชื่อมต่อ: ' + (err.message || err);
+    }
     errorEl.classList.add('show');
   }
   hideLoading();
@@ -158,6 +259,7 @@ async function handleLogin() {
 function handleLogout() {
   sessionStorage.removeItem('rb_session');
   sessionStorage.removeItem('rb_user');
+  localStorage.removeItem('rb_offline_user_session');
   currentUser = null;
   document.getElementById('app').classList.remove('active');
   document.getElementById('login-page').style.display = 'flex';
@@ -410,24 +512,51 @@ function updatePurchaseDualModeUI() {
 
 // ========== PURCHASE ROUNDS MANAGEMENT ==========
 async function loadCurrentRound() {
-  try {
-    const { data } = await sb.from('purchase_rounds')
-      .select('*')
-      .eq('status', 'open')
-      .order('created_at', { ascending: false })
-      .limit(1);
+  let round = null;
 
-    if (data && data.length > 0) {
-      currentRound = data[0];
-    } else {
-      currentRound = null;
+  // 1. Try Supabase if Online
+  if (navigator.onLine && sb) {
+    try {
+      const { data } = await sb.from('purchase_rounds')
+        .select('*')
+        .eq('status', 'open')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (data && data.length > 0) {
+        round = data[0];
+        // Cache in IndexedDB
+        try {
+          const db = await initIndexedDB();
+          if (db && db.objectStoreNames.contains('rounds')) {
+            const tx = db.transaction('rounds', 'readwrite');
+            tx.objectStore('rounds').put(round);
+          }
+        } catch { /* ignore */ }
+      }
+    } catch (err) {
+      console.warn('Error loading online round, fallback to IDB cache:', err);
     }
-    updateRoundBanner();
-  } catch (err) {
-    console.error('Error loading round:', err);
-    currentRound = null;
-    updateRoundBanner();
   }
+
+  // 2. Fallback to IndexedDB cache (including offline open round) if offline or Supabase returned no open round
+  if (!round) {
+    try {
+      const db = await initIndexedDB();
+      if (db && db.objectStoreNames.contains('rounds')) {
+        const allRounds = await new Promise((resolve) => {
+          const req = db.transaction('rounds', 'readonly').objectStore('rounds').getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        });
+        const openRound = allRounds.find(r => r.status === 'open' || r.status === 'active');
+        if (openRound) round = openRound;
+      }
+    } catch { /* ignore */ }
+  }
+
+  currentRound = round;
+  updateRoundBanner();
 }
 
 function updateRoundBanner() {
@@ -436,7 +565,8 @@ function updateRoundBanner() {
   const subtitleEl = document.getElementById('dashboard-subtitle');
 
   if (currentRound) {
-    titleEl.textContent = `${currentRound.title} (เริ่มเมื่อ ${formatDateTime(currentRound.start_date)})`;
+    const isOfflineBadge = currentRound.is_offline_round ? ' <span class="badge badge-warning" style="font-size:0.75rem;">🟠 ออฟไลน์</span>' : '';
+    titleEl.innerHTML = `${currentRound.title} (เริ่มเมื่อ ${formatDateTime(currentRound.start_date)})${isOfflineBadge}`;
     actionsEl.innerHTML = `
       <button class="btn btn-secondary btn-sm" onclick="navigateTo('rounds')">🔍 ดูรายละเอียดรอบ</button>
       <button class="btn btn-danger btn-sm" onclick="confirmCloseRound('${currentRound.id}')">🔒 ปิดรอบนี้</button>
@@ -479,8 +609,18 @@ async function saveStartNewRound() {
 
   showLoading();
   try {
-    // If there is an active round, close it first
-    if (currentRound) {
+    // Prevent opening duplicate un-synced offline rounds
+    if (currentRound && currentRound.is_offline_round && (currentRound.status === 'open' || currentRound.status === 'active')) {
+      showToast('⚠️ มีการเปิดรอบใหม่ออฟไลน์ค้างไว้อยู่แล้ว (รอซิงค์ขึ้นระบบ)', 'warning');
+      closeStartRoundModal();
+      hideLoading();
+      return;
+    }
+
+    const isOffline = !navigator.onLine;
+
+    // If online, close active round on Supabase first
+    if (currentRound && !isOffline && sb) {
       let closePayload = {
         status: 'closed',
         end_date: new Date().toISOString(),
@@ -493,24 +633,68 @@ async function saveStartNewRound() {
         delete closePayload.closed_by_name;
         await sb.from('purchase_rounds').update(closePayload).eq('id', currentRound.id);
       }
+    } else if (currentRound) {
+      // Offline close active round
+      currentRound.status = 'closed';
+      currentRound.end_date = new Date().toISOString();
+      try {
+        const db = await initIndexedDB();
+        if (db) db.transaction('rounds', 'readwrite').objectStore('rounds').put(currentRound);
+      } catch {}
     }
 
-    // Insert new open round
-    const { data, error } = await sb.from('purchase_rounds').insert({
-      title: title,
-      status: 'open',
-      start_date: new Date().toISOString()
-    }).select().single();
+    if (!isOffline && sb) {
+      // Online Supabase round creation
+      const { data, error } = await sb.from('purchase_rounds').insert({
+        title: title,
+        status: 'open',
+        start_date: new Date().toISOString()
+      }).select().single();
 
-    if (error) throw error;
+      if (error) throw error;
 
-    currentRound = data;
-    showToast(`เริ่มรอบใหม่ "${title}" สำเร็จ!`);
+      currentRound = data;
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('rounds')) {
+          db.transaction('rounds', 'readwrite').objectStore('rounds').put(currentRound);
+        }
+      } catch {}
+
+      showToast(`เริ่มรอบใหม่ "${title}" สำเร็จ!`);
+    } else {
+      // Offline round creation
+      const db = await initIndexedDB();
+      if (!db) throw new Error('IndexedDB ไม่พร้อมใช้งาน');
+
+      const tempRoundId = 'temp_round_' + Date.now();
+      const offlineRound = {
+        id: tempRoundId,
+        client_id: tempRoundId,
+        title: title,
+        status: 'open',
+        start_date: new Date().toISOString(),
+        is_offline_round: true,
+        target_table: 'purchase_rounds'
+      };
+
+      // Save to rounds store
+      db.transaction('rounds', 'readwrite').objectStore('rounds').put(offlineRound);
+
+      // Save to pending_transactions queue
+      db.transaction('pending_transactions', 'readwrite').objectStore('pending_transactions').put(offlineRound);
+
+      currentRound = offlineRound;
+      showToast(`🟠 เริ่มรอบใหม่ "${title}" ในเครื่องแล้ว (โหมดออฟไลน์)! บันทึกธุรกรรมต่อได้ทันที`, 'warning');
+    }
+
     closeStartRoundModal();
     updateRoundBanner();
+    updateOfflineQueueBadgeUI();
 
     if (currentSection === 'rounds') renderRounds();
     if (currentSection === 'dashboard') renderDashboard();
+    if (currentSection === 'truck-weights') renderTruckWeights();
   } catch (err) {
     showToast('ไม่สามารถเริ่มรอบใหม่ได้: ' + err.message, 'error');
   }
@@ -531,30 +715,57 @@ function confirmCloseRound(roundId) {
 async function closeRound(roundId) {
   showLoading();
   try {
-    let updatePayload = {
-      status: 'closed',
-      end_date: new Date().toISOString(),
-      closed_at: new Date().toISOString(),
-      closed_by_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ'
-    };
+    const isOffline = !navigator.onLine;
 
-    let { error } = await sb.from('purchase_rounds').update(updatePayload).eq('id', roundId);
-    if (error) {
-      console.warn('closeRound update fallback executed:', error.message);
-      delete updatePayload.closed_at;
-      delete updatePayload.closed_by_name;
-      const res = await sb.from('purchase_rounds').update(updatePayload).eq('id', roundId);
-      error = res.error;
+    if (!isOffline && sb) {
+      let updatePayload = {
+        status: 'closed',
+        end_date: new Date().toISOString(),
+        closed_at: new Date().toISOString(),
+        closed_by_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ'
+      };
+
+      let { error } = await sb.from('purchase_rounds').update(updatePayload).eq('id', roundId);
+      if (error) {
+        console.warn('closeRound update fallback executed:', error.message);
+        delete updatePayload.closed_at;
+        delete updatePayload.closed_by_name;
+        const res = await sb.from('purchase_rounds').update(updatePayload).eq('id', roundId);
+        error = res.error;
+      }
+      if (error) throw error;
+
+      showToast('🔒 ปิดรอบการรับซื้อสำเร็จ!');
+    } else {
+      // Offline round closure
+      const db = await initIndexedDB();
+      if (db) {
+        if (currentRound && String(currentRound.id) === String(roundId)) {
+          currentRound.status = 'closed';
+          currentRound.end_date = new Date().toISOString();
+          db.transaction('rounds', 'readwrite').objectStore('rounds').put(currentRound);
+        }
+
+        const closeItem = {
+          client_id: 'close_round_' + Date.now(),
+          target_table: 'purchase_rounds_close',
+          round_id: roundId,
+          end_date: new Date().toISOString(),
+          closed_by_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ'
+        };
+        db.transaction('pending_transactions', 'readwrite').objectStore('pending_transactions').put(closeItem);
+      }
+      showToast('🟠 ปิดรอบในเครื่องเรียบร้อยแล้ว (โหมดออฟไลน์)! รอซิงค์เมื่อมีเน็ต', 'warning');
     }
 
-    if (error) throw error;
-
+    currentRound = null;
     closeConfirmModal();
-    showToast('ปิดรอบการรับซื้อสำเร็จ!');
-    await loadCurrentRound();
+    updateRoundBanner();
+    updateOfflineQueueBadgeUI();
 
     if (currentSection === 'rounds') renderRounds();
     if (currentSection === 'dashboard') renderDashboard();
+    if (currentSection === 'truck-weights') renderTruckWeights();
   } catch (err) {
     showToast('ปิดรอบไม่สำเร็จ: ' + err.message, 'error');
   }
@@ -564,33 +775,162 @@ async function closeRound(roundId) {
 async function renderRounds() {
   showLoading();
   try {
+    let isOffline = !navigator.onLine;
+    let roundsList = [];
+
+    // 1. Fetch Purchase Rounds (Online or IDB Fallback)
+    if (navigator.onLine && sb) {
+      try {
+        const { data: rounds, error: rErr } = await sb.from('purchase_rounds').select('*').order('created_at', { ascending: false });
+        if (!rErr && Array.isArray(rounds)) {
+          roundsList = rounds;
+          // Cache rounds to IDB
+          try {
+            const db = await initIndexedDB();
+            if (db && db.objectStoreNames.contains('rounds')) {
+              const rStore = db.transaction('rounds', 'readwrite').objectStore('rounds');
+              rounds.forEach(r => rStore.put(r));
+            }
+          } catch { /* ignore */ }
+        } else { isOffline = true; }
+      } catch { isOffline = true; }
+    } else {
+      isOffline = true;
+    }
+
+    if (isOffline) {
+      let cachedRounds = [];
+      let pendingRounds = [];
+
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('rounds')) {
+          cachedRounds = await new Promise((resolve) => {
+            const req = db.transaction('rounds', 'readonly').objectStore('rounds').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+        }
+      } catch {}
+
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('pending_transactions')) {
+          const pending = await new Promise((resolve) => {
+            const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+          pendingRounds = pending.filter(p => p.target_table === 'purchase_rounds').map(p => ({
+            ...p,
+            id: p.id || p.client_id,
+            is_pending_offline: true
+          }));
+        }
+      } catch {}
+
+      const seenIds = new Set(pendingRounds.map(p => p.id));
+      const uniqueCached = cachedRounds.filter(c => !seenIds.has(c.id));
+      roundsList = [...pendingRounds, ...uniqueCached];
+      roundsList.sort((a, b) => new Date(b.created_at || b.start_date || 0) - new Date(a.created_at || a.start_date || 0));
+    }
+
+    // Set current active round if available
+    const openRound = roundsList.find(r => r.status === 'open' || r.status === 'active');
+    if (openRound) currentRound = openRound;
+
     // Render active round detail card
     const activeDetailEl = document.getElementById('active-round-detail');
     if (currentRound) {
-      // 1. Query member transactions summary for active round
-      const { data: roundTx } = await sb.from('transactions')
-        .select('net_weight, final_weight, total_price, member_code')
-        .eq('round_id', currentRound.id);
+      // 2. Fetch Transactions for Active Round (Combine Online + Offline Cache + Offline Queue)
+      let txArr = [];
 
-      const txArr = roundTx || [];
+      if (navigator.onLine && sb) {
+        try {
+          const { data: roundTx } = await sb.from('transactions').select('*').eq('round_id', currentRound.id);
+          if (Array.isArray(roundTx)) txArr = roundTx;
+        } catch { isOffline = true; }
+      }
+
+      if (isOffline || txArr.length === 0) {
+        let cachedTx = [];
+        let pendingTx = [];
+
+        try {
+          const db = await initIndexedDB();
+          if (db && db.objectStoreNames.contains('transactions')) {
+            cachedTx = await new Promise((resolve) => {
+              const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
+              req.onsuccess = () => resolve(req.result || []);
+              req.onerror = () => resolve([]);
+            });
+          }
+        } catch {}
+
+        try {
+          const db = await initIndexedDB();
+          if (db && db.objectStoreNames.contains('pending_transactions')) {
+            const pendingAll = await new Promise((resolve) => {
+              const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
+              req.onsuccess = () => resolve(req.result || []);
+              req.onerror = () => resolve([]);
+            });
+            pendingTx = pendingAll.filter(p => p.target_table !== 'purchase_rounds' && p.target_table !== 'purchase_rounds_close').map(p => ({
+              ...p,
+              id: p.id || p.client_id,
+              is_pending_offline: true
+            }));
+          }
+        } catch {}
+
+        const seenTxIds = new Set(pendingTx.map(p => p.id));
+        const uniqueCachedTx = cachedTx.filter(c => !seenTxIds.has(c.id));
+        let mergedTx = [...pendingTx, ...uniqueCachedTx];
+
+        if (currentRound.id) {
+          mergedTx = mergedTx.filter(t => String(t.round_id) === String(currentRound.id));
+        }
+        txArr = mergedTx;
+      }
+
       const totalCount = txArr.length;
       const uniqueMembers = new Set(txArr.map(t => t.member_code)).size;
       const totalPurchasedWeight = txArr.reduce((s, t) => s + Number(t.final_weight || t.net_weight || 0), 0);
       const totalPurchasedAmount = txArr.reduce((s, t) => s + Number(t.total_price || 0), 0);
+      const pendingTxCount = txArr.filter(t => t.is_pending_offline).length;
 
-      // 2. Query independent truck_deliveries table for active round
-      let truckDeliveries = [];
-      try {
-        const { data: tdData } = await sb.from('truck_deliveries')
-          .select('*')
-          .eq('round_id', currentRound.id)
-          .order('truck_number', { ascending: true });
-        truckDeliveries = tdData || [];
-      } catch (e) { /* ignore if table missing */ }
+      // Group transactions by truck_number for truck summary
+      const truckGroups = {};
+      txArr.forEach(t => {
+        const wt = Number(t.final_weight || t.net_weight || 0);
+        const truckNum = (t.truck_number || '').trim();
+        if (truckNum && truckNum !== '-- ไม่ระบุ --') {
+          if (!truckGroups[truckNum]) {
+            truckGroups[truckNum] = {
+              truck_number: truckNum,
+              head_weight: 0,
+              trailer_weight: 0,
+              total_weight: 0,
+              tx_count: 0,
+              pending_count: 0
+            };
+          }
+          const grp = truckGroups[truckNum];
+          if (t.trailer_type === 'trailer') {
+            grp.trailer_weight += wt;
+          } else {
+            grp.head_weight += wt;
+          }
+          grp.total_weight += wt;
+          grp.tx_count += 1;
+          if (t.is_pending_offline) grp.pending_count += 1;
+        }
+      });
 
-      const sumHeadWeight = truckDeliveries.reduce((s, t) => s + Number(t.head_weight || 0), 0);
-      const sumTrailerWeight = truckDeliveries.reduce((s, t) => s + Number(t.trailer_weight || 0), 0);
-      const sumTotalTruckWeight = truckDeliveries.reduce((s, t) => s + Number(t.total_weight || 0), 0);
+      const truckList = Object.values(truckGroups).sort((a, b) => a.truck_number.localeCompare(b.truck_number));
+      const sumHeadWeight = truckList.reduce((s, t) => s + t.head_weight, 0);
+      const sumTrailerWeight = truckList.reduce((s, t) => s + t.trailer_weight, 0);
+      const sumTotalTruckWeight = truckList.reduce((s, t) => s + t.total_weight, 0);
       const discrepancy = totalPurchasedWeight - sumTotalTruckWeight;
 
       let discrepancyBadge = '';
@@ -611,7 +951,7 @@ async function renderRounds() {
       }
 
       let truckTableHtml = '';
-      if (truckDeliveries.length === 0) {
+      if (truckList.length === 0) {
         truckTableHtml = `<p style="font-size:0.85rem; color:var(--text-muted); padding:10px 0; margin:0;">ยังไม่มีการบันทึกจัดส่งมอบขึ้นรถพ่วงในรอบนี้</p>`;
       } else {
         truckTableHtml = `
@@ -623,30 +963,23 @@ async function renderRounds() {
                   <th>🚛 พ่วงตัวแม่ (กก.)</th>
                   <th>🚚 พ่วงตัวลูก (กก.)</th>
                   <th>📊 รวมทั้งคัน (กก.)</th>
-                  <th>🎯 เป้าหมายคันนี้</th>
-                  <th>จัดการ</th>
+                  <th>จำนวนเที่ยว</th>
+                  <th>สถานะข้อมูล</th>
                 </tr>
               </thead>
               <tbody>
-                ${truckDeliveries.map(t => {
-                  const target = Number(t.target_weight || 0);
-                  const total = Number(t.total_weight || 0);
-                  let targetText = '-';
-                  if (target > 0) {
-                    const pct = Math.round((total / target) * 100);
-                    targetText = `${formatNumber(target)} กก. <span class="badge ${pct > 100 ? 'badge-warning' : 'badge-green'}" style="font-size:0.7rem;">${pct}%</span>`;
-                  }
+                ${truckList.map(t => {
+                  const pBadge = t.pending_count > 0 
+                    ? `<span class="badge badge-danger" style="background:#ef4444; color:#fff; font-size:0.75rem;">🔴 รอซิงค์ ${t.pending_count} รายการ</span>` 
+                    : '<span class="badge badge-green" style="font-size:0.75rem;">🟢 สมบูรณ์</span>';
                   return `
                     <tr>
                       <td><strong style="color:var(--gold); font-size:0.95rem;">🚛 ${t.truck_number}</strong></td>
                       <td>${formatNumber(t.head_weight || 0)} กก.</td>
                       <td>${formatNumber(t.trailer_weight || 0)} กก.</td>
                       <td style="font-weight:700; color:var(--green);">${formatNumber(t.total_weight || 0)} กก.</td>
-                      <td>${targetText}</td>
-                      <td>
-                        <button class="btn btn-secondary btn-sm" onclick="openEditTruckDeliveryModal('${t.id}', '${t.truck_number}', ${t.head_weight || 0}, ${t.trailer_weight || 0}, ${t.target_weight || 0})" style="font-size:0.75rem; padding:3px 8px;">✏️ แก้ไข</button>
-                        <button class="btn btn-danger btn-sm" onclick="confirmDeleteTruckDelivery('${t.id}', '${t.truck_number}')" style="font-size:0.75rem; padding:3px 8px; margin-left:4px;">🗑️ ลบ</button>
-                      </td>
+                      <td>${t.tx_count} เที่ยว</td>
+                      <td>${pBadge}</td>
                     </tr>
                   `;
                 }).join('')}
@@ -655,6 +988,10 @@ async function renderRounds() {
           </div>
         `;
       }
+
+      const pendingBadgeText = pendingTxCount > 0 
+        ? ` <span class="badge badge-danger" style="background:#ef4444; color:#fff; font-size:0.75rem; margin-left:6px;">🔴 มีรายการรอซิงค์ ${pendingTxCount} รายการ</span>` 
+        : '';
 
       const reconciliationHtml = `
         <div style="margin-top:20px; background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:var(--radius-md); padding:16px 18px;">
@@ -691,7 +1028,10 @@ async function renderRounds() {
       activeDetailEl.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
           <div>
-            <h4 style="font-size:1.2rem; font-weight:700; color:var(--text-accent);">${currentRound.title}</h4>
+            <h4 style="font-size:1.2rem; font-weight:700; color:var(--text-accent);">
+              ${currentRound.title}
+              ${pendingBadgeText}
+            </h4>
             <p style="color:var(--text-secondary); font-size:0.85rem; margin-top:4px;">
               เริ่มวันที่: ${formatDateTime(currentRound.start_date)}
             </p>
@@ -722,65 +1062,80 @@ async function renderRounds() {
         ${reconciliationHtml}
       `;
     } else {
-      activeDetailEl.innerHTML = `
-        <div class="empty-state" style="padding:20px;">
-          <div class="empty-icon">⏸️</div>
-          <p>ยังไม่มีรอบการรับซื้อที่เปิดอยู่ กดปุ่ม "เริ่มรอบใหม่" เพื่อเปิดรอบ</p>
-        </div>
-      `;
+      if (isOffline && roundsList.length === 0) {
+        activeDetailEl.innerHTML = `
+          <div class="empty-state" style="padding:20px;">
+            <div class="empty-icon" style="font-size:2.5rem; margin-bottom:8px;">📡</div>
+            <h3 style="margin-bottom:6px; color:var(--warning);">ไม่มีข้อมูลออฟไลน์ในขณะนี้</h3>
+            <p style="color:var(--text-muted); font-size:0.9rem; max-width:440px; margin:0 auto;">
+              กรุณาเชื่อมต่ออินเทอร์เน็ตเพื่อโหลดข้อมูลรอบล่าสุด หรือกดปุ่ม <b>"📥 โหลดข้อมูลไว้ใช้ออฟไลน์"</b> ที่เมนูด้านซ้ายล่วงหน้าครับ
+            </p>
+          </div>
+        `;
+      } else {
+        activeDetailEl.innerHTML = `
+          <div class="empty-state" style="padding:20px;">
+            <div class="empty-icon">⏸️</div>
+            <p>ยังไม่มีรอบการรับซื้อที่เปิดอยู่ กดปุ่ม "เริ่มรอบใหม่" เพื่อเปิดรอบ</p>
+          </div>
+        `;
+      }
     }
 
     // Render rounds table
-    const { data: rounds, error } = await sb.from('purchase_rounds')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-
     const tbody = document.getElementById('rounds-table-body');
     const emptyState = document.getElementById('rounds-empty');
-    const list = rounds || [];
+    const list = roundsList || [];
 
     if (list.length === 0) {
-      tbody.innerHTML = '';
-      emptyState.style.display = 'block';
-      tbody.closest('.table-container').style.display = 'none';
+      if (tbody) tbody.innerHTML = '';
+      if (emptyState) emptyState.style.display = 'block';
+      if (tbody) tbody.closest('.table-container').style.display = 'none';
     } else {
-      emptyState.style.display = 'none';
-      tbody.closest('.table-container').style.display = 'block';
+      if (emptyState) emptyState.style.display = 'none';
+      if (tbody) tbody.closest('.table-container').style.display = 'block';
 
-      tbody.innerHTML = list.map(r => `
-        <tr>
-          <td><strong>${r.title}</strong></td>
-          <td>
-            ${r.status === 'open' 
-              ? '<span class="badge badge-green">▶️ เปิดรับซื้ออยู่</span>' 
-              : '<span class="badge" style="background:rgba(148,163,184,0.2);color:#cbd5e1;">🔒 ปิดรอบแล้ว</span>'}
-          </td>
-          <td>${formatDateTime(r.start_date)}</td>
-          <td>${r.end_date ? formatDateTime(r.end_date) : '-'}</td>
-          <td>${r.closed_by_name || '-'}</td>
-          <td>
-            <button class="btn btn-secondary btn-sm" onclick="showRoundReport('${r.id}')" title="ดูสรุปรอบ">
-              📄 สรุปรอบ
-            </button>
-          </td>
-          <td>
-            <div style="display:flex; gap:4px; align-items:center;">
-              <button class="btn btn-gold btn-sm" onclick="exportRoundToExcel('${r.id}')" title="ดาวน์โหลด Excel สำหรับธนาคาร">📊 Excel</button>
-              <button class="btn btn-primary btn-sm" onclick="printRoundReport('${r.id}')" title="พิมพ์ A4 / บันทึก PDF สำหรับธนาคาร">🖨️ PDF/พิมพ์</button>
-              ${r.status === 'open' 
-                ? `<button class="btn btn-danger btn-sm" onclick="confirmCloseRound('${r.id}')" style="margin-left:4px;">🔒 ปิดรอบ</button>` 
-                : ''}
-              ${currentUser?.role === 'admin' 
-                ? `<button class="btn btn-danger btn-sm btn-icon" onclick="confirmDeleteRound('${r.id}')" title="ลบรอบนี้" style="margin-left:4px;">🗑️</button>` 
-                : ''}
-            </div>
-          </td>
-        </tr>
-      `).join('');
+      tbody.innerHTML = list.map(r => {
+        const isPending = r.is_pending_offline === true;
+        const statusBadge = isPending 
+          ? `<span class="badge badge-danger" style="background:#ef4444; color:#fff; font-size:0.75rem;">🔴 รอซิงค์ (เปิดออฟไลน์)</span>`
+          : (r.status === 'open' || r.status === 'active'
+            ? '<span class="badge badge-green">▶️ เปิดรับซื้ออยู่</span>' 
+            : '<span class="badge" style="background:rgba(148,163,184,0.2);color:#cbd5e1;">🔒 ปิดรอบแล้ว</span>');
+
+        return `
+          <tr style="${isPending ? 'background: rgba(239, 68, 68, 0.08);' : ''}">
+            <td>
+              <strong>${r.title}</strong>
+              ${isPending ? '<div style="font-size:0.75rem; color:#ef4444;">(บันทึกในเครื่อง)</div>' : ''}
+            </td>
+            <td>${statusBadge}</td>
+            <td>${formatDateTime(r.start_date)}</td>
+            <td>${r.end_date ? formatDateTime(r.end_date) : '-'}</td>
+            <td>${r.closed_by_name || '-'}</td>
+            <td>
+              <button class="btn btn-secondary btn-sm" onclick="showRoundReport('${r.id}')" title="ดูสรุปรอบ">
+                📄 สรุปรอบ
+              </button>
+            </td>
+            <td>
+              <div style="display:flex; gap:4px; align-items:center;">
+                <button class="btn btn-gold btn-sm" onclick="exportRoundToExcel('${r.id}')" title="ดาวน์โหลด Excel สำหรับธนาคาร">📊 Excel</button>
+                <button class="btn btn-primary btn-sm" onclick="printRoundReport('${r.id}')" title="พิมพ์ A4 / บันทึก PDF สำหรับธนาคาร">🖨️ PDF/พิมพ์</button>
+                ${(r.status === 'open' || r.status === 'active') 
+                  ? `<button class="btn btn-danger btn-sm" onclick="confirmCloseRound('${r.id}')" style="margin-left:4px;">🔒 ปิดรอบ</button>` 
+                  : ''}
+                ${currentUser?.role === 'admin' && !isPending
+                  ? `<button class="btn btn-danger btn-sm btn-icon" onclick="confirmDeleteRound('${r.id}')" title="ลบรอบนี้" style="margin-left:4px;">🗑️</button>` 
+                  : ''}
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
     }
   } catch (err) {
+    console.error('renderRounds error:', err);
     showToast('โหลดข้อมูลรอบไม่สำเร็จ: ' + err.message, 'error');
   }
   hideLoading();
@@ -789,16 +1144,80 @@ async function renderRounds() {
 async function showRoundReport(roundId) {
   showLoading();
   try {
-    const { data: round } = await sb.from('purchase_rounds').select('*').eq('id', roundId).single();
-    if (!round) throw new Error('ไม่พบข้อมูลรอบการรับซื้อ');
+    let round = null;
+    let transactions = [];
+    let isOffline = !navigator.onLine;
 
-    // Fetch all transactions in this round
-    const { data: txList } = await sb.from('transactions')
-      .select('*')
-      .eq('round_id', roundId)
-      .order('date');
+    if (navigator.onLine && sb) {
+      try {
+        const { data: rData } = await sb.from('purchase_rounds').select('*').eq('id', roundId).single();
+        if (rData) round = rData;
+        const { data: txList } = await sb.from('transactions').select('*').eq('round_id', roundId).order('date');
+        if (Array.isArray(txList)) transactions = txList;
+      } catch { isOffline = true; }
+    } else {
+      isOffline = true;
+    }
 
-    const transactions = txList || [];
+    if (isOffline || !round) {
+      // Offline fallback for round details
+      if (currentRound && String(currentRound.id) === String(roundId)) {
+        round = currentRound;
+      } else {
+        try {
+          const db = await initIndexedDB();
+          if (db && db.objectStoreNames.contains('rounds')) {
+            const allR = await new Promise((res) => {
+              const req = db.transaction('rounds', 'readonly').objectStore('rounds').getAll();
+              req.onsuccess = () => res(req.result || []);
+              req.onerror = () => res([]);
+            });
+            round = allR.find(r => String(r.id) === String(roundId));
+          }
+        } catch {}
+      }
+
+      if (!round) round = { id: roundId, title: 'รอบส่งมอบยาง (ออฟไลน์)', start_date: new Date().toISOString() };
+
+      // Offline fallback for transactions
+      let cachedTx = [];
+      let pendingTx = [];
+
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('transactions')) {
+          cachedTx = await new Promise((res) => {
+            const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
+            req.onsuccess = () => res(req.result || []);
+            req.onerror = () => res([]);
+          });
+        }
+      } catch {}
+
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('pending_transactions')) {
+          const pendingAll = await new Promise((res) => {
+            const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
+            req.onsuccess = () => res(req.result || []);
+            req.onerror = () => res([]);
+          });
+          pendingTx = pendingAll.filter(p => p.target_table !== 'purchase_rounds' && p.target_table !== 'purchase_rounds_close').map(p => ({
+            ...p,
+            id: p.id || p.client_id,
+            is_pending_offline: true
+          }));
+        }
+      } catch {}
+
+      const seenTx = new Set(pendingTx.map(p => p.id));
+      const uniqueCached = cachedTx.filter(c => !seenTx.has(c.id));
+      let merged = [...pendingTx, ...uniqueCached];
+      merged = merged.filter(t => String(t.round_id) === String(roundId));
+      merged.sort((a, b) => new Date(a.date || a.created_at || 0) - new Date(b.date || b.created_at || 0));
+      transactions = merged;
+    }
+
     currentReportRound = round;
     currentReportTxList = transactions;
 
@@ -1366,7 +1785,8 @@ async function showMemberSalesHistory(memberCode) {
   showLoading();
   try {
     // 1. Fetch member details
-    const { data: member } = await sb.from('members').select('*').eq('code', memberCode).single();
+    const allMembers = await fetchMembersData(memberCode, 100);
+    const member = allMembers.find(m => m.code === memberCode) || allMembers[0];
     if (!member) throw new Error('ไม่พบข้อมูลสมาชิก');
 
     // 2. Fetch member's transactions
@@ -1737,14 +2157,8 @@ async function renderDashboard(showSpinner = true, newTransaction = null) {
 async function renderMembers(filter = '') {
   showLoading();
   try {
-    let query = sb.from('members').select('*').order('code');
-    if (filter) {
-      query = query.or(`code.ilike.%${filter}%,name.ilike.%${filter}%`);
-    }
-    const { data, error } = await query;
-    if (error) throw error;
+    const members = await fetchMembersData(filter, 1000);
 
-    const members = data || [];
     const tbody = document.getElementById('members-table-body');
     const emptyState = document.getElementById('members-empty');
 
@@ -1839,29 +2253,79 @@ async function saveMember() {
   if (!code) { showToast('กรุณากรอกรหัสสมาชิก', 'error'); return; }
   if (!name) { showToast('กรุณากรอกชื่อ-นามสกุล', 'error'); return; }
 
-  // Check duplicate code
-  const { data: existing } = await sb.from('members').select('id, name').eq('code', code);
-  const duplicate = existing?.find(m => m.id !== hiddenId);
-  if (duplicate) {
-    showToast(`รหัส ${code} ถูกใช้แล้วโดย ${duplicate.name}`, 'error');
-    return;
-  }
+  const isOffline = !navigator.onLine;
 
   showLoading();
   try {
-    if (hiddenId) {
-      const { error } = await sb.from('members').update({ code, name, phone, account_no }).eq('id', hiddenId);
-      if (error) throw error;
-      showToast('แก้ไขข้อมูลสมาชิกสำเร็จ!');
+    if (!isOffline && sb) {
+      // Check duplicate code online
+      const { data: existing } = await sb.from('members').select('id, name').eq('code', code);
+      const duplicate = existing?.find(m => String(m.id) !== String(hiddenId));
+      if (duplicate) {
+        hideLoading();
+        showToast(`รหัส ${code} ถูกใช้แล้วโดย ${duplicate.name}`, 'error');
+        return;
+      }
+
+      if (hiddenId) {
+        const { error } = await sb.from('members').update({ code, name, phone, account_no }).eq('id', hiddenId);
+        if (error) throw error;
+        showToast('แก้ไขข้อมูลสมาชิกสำเร็จ!');
+      } else {
+        const { error } = await sb.from('members').insert({ code, name, phone, account_no });
+        if (error) throw error;
+        showToast('เพิ่มสมาชิกใหม่สำเร็จ!');
+      }
+
+      // Refresh IDB members cache
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('members')) {
+          const mStore = db.transaction('members', 'readwrite').objectStore('members');
+          mStore.put({ id: hiddenId || ('m_' + Date.now()), code, name, phone, account_no });
+        }
+      } catch {}
     } else {
-      const { error } = await sb.from('members').insert({ code, name, phone, account_no });
-      if (error) throw error;
-      showToast('เพิ่มสมาชิกใหม่สำเร็จ!');
+      // Offline mode: Save directly to IndexedDB members store & queue for sync
+      const db = await initIndexedDB();
+      if (!db) throw new Error('IndexedDB ไม่พร้อมใช้งาน');
+
+      const memberId = hiddenId || ('m_off_' + Date.now());
+      const memberObj = {
+        id: memberId,
+        code,
+        name,
+        phone,
+        account_no,
+        created_at: new Date().toISOString()
+      };
+
+      // Save to IDB members store for immediate offline use
+      const mTx = db.transaction('members', 'readwrite');
+      mTx.objectStore('members').put(memberObj);
+
+      // Queue into pending_transactions for sync when back online
+      const pendingItem = {
+        client_id: 'member_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+        target_table: 'members',
+        code,
+        name,
+        phone,
+        account_no,
+        created_at: memberObj.created_at
+      };
+      const pTx = db.transaction('pending_transactions', 'readwrite');
+      pTx.objectStore('pending_transactions').put(pendingItem);
+
+      showToast(`🟠 บันทึกข้อมูลสมาชิก "${name}" ในเครื่องแล้ว (โหมดออฟไลน์)! รอซิงค์เมื่อมีเน็ต`, 'warning');
     }
+
     closeMemberModal();
+    updateOfflineQueueBadgeUI();
     await renderMembers();
   } catch (err) {
-    showToast('บันทึกไม่สำเร็จ: ' + err.message, 'error');
+    console.error('saveMember error:', err);
+    showToast('บันทึกสมาชิกไม่สำเร็จ: ' + err.message, 'error');
   }
   hideLoading();
 }
@@ -2055,14 +2519,9 @@ async function searchPurchaseMember(query) {
   if (!query.trim()) { listEl.innerHTML = ''; return; }
 
   try {
-    const { data } = await sb.from('members')
-      .select('*')
-      .or(`code.ilike.%${query}%,name.ilike.%${query}%`)
-      .order('code')
-      .limit(8);
+    const members = await fetchMembersData(query, 8);
 
-    const members = data || [];
-    if (members.length === 0) {
+    if (!members || members.length === 0) {
       listEl.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:0.85rem;">ไม่พบสมาชิก</div>';
       return;
     }
@@ -2074,7 +2533,7 @@ async function searchPurchaseMember(query) {
       </div>
     `).join('');
   } catch (err) {
-    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:0.85rem;">เกิดข้อผิดพลาด</div>';
+    listEl.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:0.85rem;">เกิดข้อผิดพลาดในการค้นหา</div>';
   }
 }
 
@@ -2230,41 +2689,83 @@ async function saveTransaction(confirmedOverride = false) {
   const deductionAmount = totalNet * deductionPercent / 100;
   const finalWeight = Math.max(0, totalNet - deductionAmount);
   const totalPrice = finalWeight * netPricePerKg;
-
   const isDualMode = cachedSettings?.dual_station_mode === true;
+
+  let targetRoundId = currentRound ? currentRound.id : null;
+  if (!targetRoundId) {
+    try {
+      const db = await initIndexedDB();
+      if (db && db.objectStoreNames.contains('rounds')) {
+        const allR = await new Promise(res => {
+          const req = db.transaction('rounds', 'readonly').objectStore('rounds').getAll();
+          req.onsuccess = () => res(req.result || []);
+          req.onerror = () => res([]);
+        });
+        const openR = allR.find(r => r.status === 'open' || r.status === 'active');
+        if (openR) targetRoundId = openR.id;
+        else if (allR.length > 0) targetRoundId = allR[allR.length - 1].id;
+      }
+    } catch { /* ignore */ }
+  }
+
+  const payload = {
+    member_code: selectedMember.code,
+    member_name: selectedMember.name,
+    member_account_no: selectedMember.account_no || '',
+    rubber_type: rubberType,
+    gross_weight: totalGross,
+    cart_weight: totalCart,
+    net_weight: totalNet,
+    deduction_percent: deductionPercent,
+    final_weight: finalWeight,
+    auction_price: auctionPrice,
+    yard_fee: yardFee,
+    price_per_kg: netPricePerKg,
+    total_price: totalPrice,
+    trips: tripDetails,
+    trips_detail: tripDetails,
+    trip_count: tripDetails.length,
+    round_id: targetRoundId,
+    truck_number: truckNumber,
+    trailer_type: trailerType,
+    created_by_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
+    created_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
+    confirmed_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
+    status: isDualMode ? 'pending' : 'confirmed',
+    date: new Date().toISOString()
+  };
+
+  // If offline, save directly to IndexedDB Offline Queue!
+  if (!navigator.onLine) {
+    return saveOfflinePendingTransaction(payload, isDualMode);
+  }
 
   showLoading();
 
   try {
     if (isDualMode) {
       // Station 1: Submit data to pending_transactions table
-      const pendingPayload = {
-        member_code: selectedMember.code,
-        member_name: selectedMember.name,
-        member_account_no: selectedMember.account_no || '',
-        rubber_type: rubberType,
-        gross_weight: totalGross,
-        cart_weight: totalCart,
-        net_weight: totalNet,
-        deduction_percent: deductionPercent,
-        final_weight: finalWeight,
-        auction_price: auctionPrice,
-        yard_fee: yardFee,
-        price_per_kg: netPricePerKg,
-        total_price: totalPrice,
-        trips: tripDetails,
-        trip_count: tripDetails.length,
-        round_id: currentRound ? currentRound.id : null,
-        truck_number: truckNumber,
-        trailer_type: trailerType,
-        status: 'pending',
-        created_by_user_id: currentUser ? currentUser.id : null,
-        created_by_username: currentUser ? currentUser.username : 'user',
-        created_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        date: new Date().toISOString()
-      };
+      const pendingPayload = { ...payload };
+      delete pendingPayload.created_by_name;
+      delete pendingPayload.confirmed_by_display_name;
+      pendingPayload.created_by_user_id = currentUser ? currentUser.id : null;
+      pendingPayload.created_by_username = currentUser ? currentUser.username : 'user';
 
       let { data, error } = await sb.from('pending_transactions').insert(pendingPayload).select().single();
+
+      if (error && error.message.includes('column')) {
+        delete pendingPayload.trips;
+        delete pendingPayload.cart_weight;
+        delete pendingPayload.auction_price;
+        delete pendingPayload.yard_fee;
+        let res = await sb.from('pending_transactions').insert(pendingPayload).select().single();
+        if (res.error && res.error.message.includes('column')) {
+          delete pendingPayload.trips_detail;
+          res = await sb.from('pending_transactions').insert(pendingPayload).select().single();
+        }
+        data = res.data;
+        error = res.error;
+      }
 
       if (error) {
         if (error.message.includes('relation') || error.message.includes('pending_transactions')) {
@@ -2277,40 +2778,20 @@ async function saveTransaction(confirmedOverride = false) {
       await initPurchase();
     } else {
       // Single Station Mode: Save directly & Print
-      const payload = {
-        member_code: selectedMember.code,
-        member_name: selectedMember.name,
-        member_account_no: selectedMember.account_no || '',
-        rubber_type: rubberType,
-        gross_weight: totalGross,
-        cart_weight: totalCart,
-        net_weight: totalNet,
-        deduction_percent: deductionPercent,
-        final_weight: finalWeight,
-        auction_price: auctionPrice,
-        yard_fee: yardFee,
-        price_per_kg: netPricePerKg,
-        total_price: totalPrice,
-        trips: tripDetails,
-        trip_count: tripDetails.length,
-        round_id: currentRound ? currentRound.id : null,
-        truck_number: truckNumber,
-        trailer_type: trailerType,
-        created_by_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        created_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        confirmed_by_display_name: currentUser ? currentUser.display_name : 'ผู้ดูแลระบบ',
-        date: new Date().toISOString()
-      };
-
       let { data, error } = await sb.from('transactions').insert(payload).select().single();
 
       if (error && error.message.includes('column')) {
+        delete payload.trips;
         delete payload.cart_weight;
         delete payload.auction_price;
         delete payload.yard_fee;
         delete payload.created_by_display_name;
         delete payload.confirmed_by_display_name;
-        const res = await sb.from('transactions').insert(payload).select().single();
+        let res = await sb.from('transactions').insert(payload).select().single();
+        if (res.error && res.error.message.includes('column')) {
+          delete payload.trips_detail;
+          res = await sb.from('transactions').insert(payload).select().single();
+        }
         data = res.data;
         error = res.error;
       }
@@ -2327,6 +2808,10 @@ async function saveTransaction(confirmedOverride = false) {
       await initPurchase();
     }
   } catch (err) {
+    if (!navigator.onLine || err.message.includes('fetch') || err.message.includes('network') || err.message.includes('Failed to fetch')) {
+      hideLoading();
+      return saveOfflinePendingTransaction(payload, isDualMode);
+    }
     showToast('บันทึกไม่สำเร็จ: ' + err.message, 'error');
   }
   hideLoading();
@@ -2889,19 +3374,38 @@ function printReceipt() {
 
 // ========== HISTORY ==========
 async function renderHistory() {
-  // Populate round filter & member filter
+  // Populate round filter & member filter (with offline fallbacks)
   try {
-    const { data: rounds } = await sb.from('purchase_rounds').select('id, title, status').order('created_at', { ascending: false });
-    const roundFilter = document.getElementById('history-round-filter');
-    const currentRoundVal = roundFilter.value;
-    roundFilter.innerHTML = '<option value="">ทุกรอบการรับซื้อ</option>' +
-      (rounds || []).map(r => `<option value="${r.id}" ${r.id === currentRoundVal ? 'selected' : ''}>${r.title} (${r.status === 'open' ? 'กำลังเปิด' : 'ปิดแล้ว'})</option>`).join('');
+    let rounds = [];
+    let members = [];
+    if (navigator.onLine && sb) {
+      try {
+        const { data: r } = await sb.from('purchase_rounds').select('id, title, status').order('created_at', { ascending: false });
+        if (r) rounds = r;
+      } catch { /* ignore */ }
+      try {
+        const { data: m } = await sb.from('members').select('code, name').order('code');
+        if (m) members = m;
+      } catch { /* ignore */ }
+    }
 
-    const { data: members } = await sb.from('members').select('code, name').order('code');
+    if (members.length === 0) {
+      members = await fetchMembersData('', 1000);
+    }
+
+    const roundFilter = document.getElementById('history-round-filter');
+    if (roundFilter) {
+      const currentRoundVal = roundFilter.value;
+      roundFilter.innerHTML = '<option value="">ทุกรอบการรับซื้อ</option>' +
+        (rounds || []).map(r => `<option value="${r.id}" ${r.id === currentRoundVal ? 'selected' : ''}>${r.title} (${r.status === 'open' ? 'กำลังเปิด' : 'ปิดแล้ว'})</option>`).join('');
+    }
+
     const memberFilter = document.getElementById('history-member-filter');
-    const currentMemberVal = memberFilter.value;
-    memberFilter.innerHTML = '<option value="">สมาชิกทั้งหมด</option>' +
-      (members || []).map(m => `<option value="${m.code}" ${m.code === currentMemberVal ? 'selected' : ''}>${m.code} - ${m.name}</option>`).join('');
+    if (memberFilter) {
+      const currentMemberVal = memberFilter.value;
+      memberFilter.innerHTML = '<option value="">สมาชิกทั้งหมด</option>' +
+        (members || []).map(m => `<option value="${m.code}" ${m.code === currentMemberVal ? 'selected' : ''}>${m.code} - ${m.name}</option>`).join('');
+    }
   } catch (err) { /* ignore */ }
 
   await filterHistory();
@@ -2912,22 +3416,102 @@ let currentFilteredHistory = [];
 async function filterHistory() {
   showLoading();
   try {
-    let query = sb.from('transactions').select('*').order('date', { ascending: false });
+    let dataList = [];
+    let isOffline = !navigator.onLine;
 
-    const roundId = document.getElementById('history-round-filter').value;
-    const dateFrom = document.getElementById('history-date-from').value;
-    const dateTo = document.getElementById('history-date-to').value;
-    const memberCode = document.getElementById('history-member-filter').value;
+    // 1. Try fetching from Supabase if online
+    if (navigator.onLine && sb) {
+      try {
+        const { data, error } = await sb.from('transactions').select('*').order('date', { ascending: false });
+        if (!error && Array.isArray(data)) {
+          dataList = data;
+          // Cache transactions to IndexedDB in background for offline use
+          try {
+            const db = await initIndexedDB();
+            if (db && db.objectStoreNames.contains('transactions')) {
+              const txStore = db.transaction('transactions', 'readwrite').objectStore('transactions');
+              data.forEach(t => txStore.put(t));
+            }
+          } catch { /* ignore */ }
+        } else {
+          isOffline = true;
+        }
+      } catch (err) {
+        console.warn('[FilterHistory] Supabase fetch failed, falling back to local storage:', err);
+        isOffline = true;
+      }
+    } else {
+      isOffline = true;
+    }
 
-    if (roundId) query = query.eq('round_id', roundId);
-    if (dateFrom) query = query.gte('date', dateFrom + 'T00:00:00');
-    if (dateTo) query = query.lte('date', dateTo + 'T23:59:59');
-    if (memberCode) query = query.eq('member_code', memberCode);
+    // 2. Fallback / Combine Offline Data if offline or fetch failed
+    if (isOffline) {
+      let cachedTx = [];
+      let pendingTx = [];
 
-    const { data, error } = await query;
-    if (error) throw error;
+      // Read cached confirmed transactions from IDB
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('transactions')) {
+          cachedTx = await new Promise((resolve) => {
+            const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+        }
+      } catch { cachedTx = []; }
 
-    const filtered = data || [];
+      // Read pending offline transactions from IDB queue
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('pending_transactions')) {
+          pendingTx = await new Promise((resolve) => {
+            const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+        }
+      } catch { pendingTx = []; }
+
+      // Mark pending items with is_pending_offline flag
+      const formattedPending = pendingTx.map(p => ({
+        ...p,
+        id: p.id || p.client_id,
+        is_pending_offline: true
+      }));
+
+      // Merge: pending items first + cached items (avoid duplicates)
+      const seenIds = new Set(formattedPending.map(p => p.id));
+      const uniqueCached = cachedTx.filter(c => !seenIds.has(c.id));
+
+      dataList = [...formattedPending, ...uniqueCached];
+      // Sort by date descending
+      dataList.sort((a, b) => new Date(b.date || b.created_at || b.offline_saved_at || 0) - new Date(a.date || a.created_at || a.offline_saved_at || 0));
+    }
+
+    // 3. Client-side Filter Application (Round, Date Range, Member)
+    const roundId = document.getElementById('history-round-filter')?.value || '';
+    const dateFrom = document.getElementById('history-date-from')?.value || '';
+    const dateTo = document.getElementById('history-date-to')?.value || '';
+    const memberCode = document.getElementById('history-member-filter')?.value || '';
+
+    let filtered = dataList;
+
+    if (roundId) {
+      filtered = filtered.filter(t => String(t.round_id) === String(roundId));
+    }
+    if (dateFrom) {
+      const fromTime = new Date(dateFrom + 'T00:00:00').getTime();
+      filtered = filtered.filter(t => new Date(t.date || t.created_at || 0).getTime() >= fromTime);
+    }
+    if (dateTo) {
+      const toTime = new Date(dateTo + 'T23:59:59').getTime();
+      filtered = filtered.filter(t => new Date(t.date || t.created_at || 0).getTime() <= toTime);
+    }
+    if (memberCode) {
+      filtered = filtered.filter(t => String(t.member_code) === String(memberCode));
+    }
+
     currentFilteredHistory = filtered;
 
     const totalCount = filtered.length;
@@ -2942,7 +3526,7 @@ async function filterHistory() {
     const deleteAllBtn = document.getElementById('history-delete-all-btn');
     const totalBadge = document.getElementById('history-total-count-badge');
     if (deleteAllBtn) {
-      if (currentUser?.role === 'admin' && filtered.length > 0) {
+      if (currentUser?.role === 'admin' && filtered.length > 0 && !isOffline) {
         deleteAllBtn.style.display = 'inline-flex';
         if (totalBadge) totalBadge.textContent = totalCount;
       } else {
@@ -2960,38 +3544,80 @@ async function filterHistory() {
 
     if (filtered.length === 0) {
       tbody.innerHTML = '';
+      if (isOffline) {
+        emptyState.innerHTML = `
+          <div class="empty-icon" style="font-size:2.5rem; margin-bottom:8px;">📡</div>
+          <h3 style="margin-bottom:6px; color:var(--warning);">ไม่มีข้อมูลออฟไลน์ในขณะนี้</h3>
+          <p style="color:var(--text-muted); font-size:0.9rem; max-width:440px; margin:0 auto;">
+            กรุณาเชื่อมต่ออินเทอร์เน็ตเพื่อโหลดประวัติล่าสุด หรือกดปุ่ม <b>"📥 โหลดข้อมูลไว้ใช้ออฟไลน์"</b> ที่เมนูด้านซ้ายล่วงหน้าครับ
+          </p>
+        `;
+      } else {
+        emptyState.innerHTML = `
+          <div class="empty-icon" style="font-size:2.5rem; margin-bottom:8px;">📋</div>
+          <h3 style="margin-bottom:6px;">ไม่พบประวัติธุรกรรม</h3>
+          <p style="color:var(--text-muted); font-size:0.9rem;">ยังไม่มีรายการรับซื้อยางตามตัวกรองที่เลือก</p>
+        `;
+      }
       emptyState.style.display = 'block';
       tbody.closest('.table-container').style.display = 'none';
     } else {
       emptyState.style.display = 'none';
       tbody.closest('.table-container').style.display = 'block';
-      tbody.innerHTML = filtered.map(t => `
-        <tr>
-          <td style="text-align:center;">
-            <input type="checkbox" class="history-row-cb" value="${t.id}" onchange="updateHistoryBatchDeleteUI()">
-          </td>
-          <td>${formatDateTime(t.date)}</td>
-          <td><span class="badge badge-green">${t.member_code}</span></td>
-          <td>${t.member_name}</td>
-          <td>${getRubberTypeBadge(t.rubber_type)}</td>
-          <td>${t.trip_count || 1}</td>
-          <td>${formatNumber(t.net_weight)} กก.</td>
-          <td style="font-weight:600;color:var(--text-accent);">${formatNumber(t.final_weight || t.net_weight)} กก.</td>
-          <td>${formatNumber(t.price_per_kg)}</td>
-          <td style="font-weight:600;color:var(--gold);">${formatNumber(t.total_price)} ฿</td>
-          <td><span class="badge" style="background:rgba(255,255,255,0.08);">${t.created_by_name || 'ผู้ดูแลระบบ'}</span></td>
-          <td>
-            <button class="btn btn-secondary btn-sm btn-icon" onclick="showReceiptFromHistory('${t.id}')" title="ใบเสร็จ">🧾</button>
-            <button class="btn btn-danger btn-sm btn-icon" onclick="confirmDeleteTransaction('${t.id}')" title="ลบ" style="margin-left:4px;">🗑️</button>
-          </td>
-        </tr>
-      `).join('');
+      tbody.innerHTML = filtered.map(t => {
+        const isPending = t.is_pending_offline === true;
+        const rowStyle = isPending 
+          ? 'background: rgba(239, 68, 68, 0.08); border-left: 4px solid #ef4444;' 
+          : '';
+        
+        const statusBadge = isPending 
+          ? `<span class="badge badge-danger" style="background:#ef4444; color:#fff; font-size:0.75rem; padding:3px 8px;">🔴 รอซิงค์</span>` 
+          : `<span class="badge" style="background:rgba(255,255,255,0.08);">${t.created_by_name || t.created_by_display_name || 'ผู้ดูแลระบบ'}</span>`;
+
+        const checkAttr = isPending ? 'disabled title="รายการรอซิงค์ไม่สามารถลบแบบกลุ่มได้"' : '';
+
+        return `
+          <tr style="${rowStyle}">
+            <td style="text-align:center;">
+              <input type="checkbox" class="history-row-cb" value="${t.id}" onchange="updateHistoryBatchDeleteUI()" ${checkAttr}>
+            </td>
+            <td>${formatDateTime(t.date || t.created_at || t.offline_saved_at)}</td>
+            <td><span class="badge badge-green">${t.member_code}</span></td>
+            <td>
+              <strong>${t.member_name}</strong>
+              ${isPending ? '<div style="font-size:0.75rem; color:#ef4444;">(บันทึกในเครื่อง)</div>' : ''}
+            </td>
+            <td>${getRubberTypeBadge(t.rubber_type)}</td>
+            <td>${t.trip_count || (t.trips ? t.trips.length : 1)}</td>
+            <td>${formatNumber(t.net_weight)} กก.</td>
+            <td style="font-weight:600;color:var(--text-accent);">${formatNumber(t.final_weight || t.net_weight)} กก.</td>
+            <td>${formatNumber(t.price_per_kg)}</td>
+            <td style="font-weight:600;color:var(--gold);">${formatNumber(t.total_price)} ฿</td>
+            <td>${statusBadge}</td>
+            <td>
+              <button class="btn btn-secondary btn-sm btn-icon" onclick="showReceiptFromHistory('${t.id}')" title="ดู/พิมพ์ใบเสร็จ">🧾</button>
+              ${!isPending ? `<button class="btn btn-danger btn-sm btn-icon" onclick="confirmDeleteTransaction('${t.id}')" title="ลบ" style="margin-left:4px;">🗑️</button>` : ''}
+            </td>
+          </tr>
+        `;
+      }).join('');
     }
   } catch (err) {
+    console.error('filterHistory error:', err);
     showToast('โหลดประวัติไม่สำเร็จ: ' + err.message, 'error');
   }
   hideLoading();
 }
+
+function showReceiptFromHistory(id) {
+  const tx = (currentFilteredHistory || []).find(item => String(item.id || item.client_id) === String(id));
+  if (tx) {
+    showReceipt(tx);
+  } else {
+    showToast('ไม่พบข้อมูลใบเสร็จ', 'error');
+  }
+}
+window.showReceiptFromHistory = showReceiptFromHistory;
 
 function toggleSelectAllHistory(isChecked) {
   const checkboxes = document.querySelectorAll('.history-row-cb');
@@ -3113,6 +3739,7 @@ function onPurchaseTruckSelect(val) {
 }
 
 let currentTruckWeightsRoundId = null;
+let currentTruckWeightsTransactions = [];
 
 async function renderTruckWeights(targetRoundId = null) {
   await loadCurrentRound();
@@ -3124,9 +3751,32 @@ async function renderTruckWeights(targetRoundId = null) {
 
   showLoading();
   try {
+    let roundsList = [];
+    let isOffline = !navigator.onLine;
+
     // 1. Load round options into dropdown
-    const { data: rounds } = await sb.from('purchase_rounds').select('*').order('created_at', { ascending: false });
-    const roundsList = rounds || [];
+    if (navigator.onLine && sb) {
+      try {
+        const { data: rounds } = await sb.from('purchase_rounds').select('*').order('created_at', { ascending: false });
+        if (rounds) roundsList = rounds;
+      } catch { isOffline = true; }
+    } else {
+      isOffline = true;
+    }
+
+    // Fallback rounds if offline
+    if (roundsList.length === 0) {
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('rounds')) {
+          roundsList = await new Promise((resolve) => {
+            const req = db.transaction('rounds', 'readonly').objectStore('rounds').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+        }
+      } catch { roundsList = []; }
+    }
 
     let selectedRoundId = targetRoundId;
     if (!selectedRoundId && filterEl && filterEl.value) {
@@ -3135,7 +3785,7 @@ async function renderTruckWeights(targetRoundId = null) {
 
     if (filterEl) {
       filterEl.innerHTML = `
-        ${roundsList.map(r => `<option value="${r.id}">${r.status === 'active' ? '🟢 (กำลังเปิด) ' : '🔒 (ปิดรอบแล้ว) '} ${r.title}</option>`).join('')}
+        ${roundsList.map(r => `<option value="${r.id}">${r.status === 'active' || r.status === 'open' ? '🟢 (กำลังเปิด) ' : '🔒 (ปิดรอบแล้ว) '} ${r.title}</option>`).join('')}
         <option value="all">📦 ทุกรอบส่งมอบยาง (รวมทั้งหมด)</option>
       `;
 
@@ -3159,23 +3809,84 @@ async function renderTruckWeights(targetRoundId = null) {
 
     if (titleEl) {
       if (activeRoundObj) {
-        const statusTag = activeRoundObj.status === 'active' ? '🟢 กำลังเปิดรับซื้อ' : '🔒 ปิดรอบส่งมอบแล้ว';
+        const statusTag = activeRoundObj.status === 'active' || activeRoundObj.status === 'open' ? '🟢 กำลังเปิดรับซื้อ' : '🔒 ปิดรอบส่งมอบแล้ว';
         titleEl.innerHTML = `⚡ ข้อมูลน้ำหนักรถพ่วงประจำรอบ — <strong>${activeRoundObj.title}</strong> <small style="font-size:0.85rem; font-weight:normal; opacity:0.9;">(${statusTag})</small>`;
       } else {
         titleEl.textContent = '⚡ ข้อมูลน้ำหนักรถพ่วง — สรุปรวมทุกรอบส่งมอบยาง';
       }
     }
 
-    // 3. Query all transactions for selected round or all
-    let query = sb.from('transactions').select('*');
-    if (selectedRoundId && selectedRoundId !== 'all') {
-      query = query.eq('round_id', selectedRoundId);
+    // 3. Query all transactions for selected round or all (Online or Offline Combine)
+    let txArr = [];
+    if (navigator.onLine && sb) {
+      try {
+        let query = sb.from('transactions').select('*');
+        if (selectedRoundId && selectedRoundId !== 'all') {
+          query = query.eq('round_id', selectedRoundId);
+        }
+        const { data: roundTx, error: txErr } = await query;
+        if (!txErr && Array.isArray(roundTx)) {
+          txArr = roundTx;
+          // Cache to IDB
+          try {
+            const db = await initIndexedDB();
+            if (db && db.objectStoreNames.contains('transactions')) {
+              const store = db.transaction('transactions', 'readwrite').objectStore('transactions');
+              roundTx.forEach(t => store.put(t));
+            }
+          } catch { /* ignore */ }
+        } else {
+          isOffline = true;
+        }
+      } catch { isOffline = true; }
+    } else {
+      isOffline = true;
     }
-    const { data: roundTx, error: txErr } = await query;
 
-    if (txErr) throw txErr;
+    if (isOffline) {
+      let cachedTx = [];
+      let pendingTx = [];
 
-    const txArr = roundTx || [];
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('transactions')) {
+          cachedTx = await new Promise((resolve) => {
+            const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+        }
+      } catch { cachedTx = []; }
+
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('pending_transactions')) {
+          pendingTx = await new Promise((resolve) => {
+            const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+        }
+      } catch { pendingTx = []; }
+
+      const formattedPending = pendingTx.map(p => ({
+        ...p,
+        id: p.id || p.client_id,
+        is_pending_offline: true
+      }));
+
+      const seenIds = new Set(formattedPending.map(p => p.id));
+      const uniqueCached = cachedTx.filter(c => !seenIds.has(c.id));
+
+      let merged = [...formattedPending, ...uniqueCached];
+      if (selectedRoundId && selectedRoundId !== 'all') {
+        merged = merged.filter(t => String(t.round_id) === String(selectedRoundId));
+      }
+      txArr = merged;
+    }
+
+    currentTruckWeightsTransactions = txArr;
+
     const totalPurchasedWeight = txArr.reduce((s, t) => s + Number(t.final_weight || t.net_weight || 0), 0);
     const totalPurchasedAmount = txArr.reduce((s, t) => s + Number(t.total_price || 0), 0);
 
@@ -3186,6 +3897,7 @@ async function renderTruckWeights(targetRoundId = null) {
     txArr.forEach(t => {
       const wt = Number(t.final_weight || t.net_weight || 0);
       const truckNum = (t.truck_number || '').trim();
+
       if (!truckNum || truckNum === '-- ไม่ระบุ --') {
         unassignedWeight += wt;
       } else {
@@ -3196,6 +3908,7 @@ async function renderTruckWeights(targetRoundId = null) {
             trailer_weight: 0,
             total_weight: 0,
             tx_count: 0,
+            pending_count: 0,
             members: new Set(),
             tx_list: []
           };
@@ -3209,6 +3922,7 @@ async function renderTruckWeights(targetRoundId = null) {
         }
         grp.total_weight += wt;
         grp.tx_count += 1;
+        if (t.is_pending_offline) grp.pending_count += 1;
         grp.members.add(t.member_name);
         grp.tx_list.push(t);
       }
@@ -3252,27 +3966,54 @@ async function renderTruckWeights(targetRoundId = null) {
     // Populate table
     if (truckList.length === 0) {
       if (tbody) tbody.innerHTML = '';
-      if (emptyState) emptyState.style.display = 'block';
+      if (emptyState) {
+        if (isOffline) {
+          emptyState.innerHTML = `
+            <div class="empty-icon" style="font-size:2.5rem; margin-bottom:8px;">📡</div>
+            <h3 style="margin-bottom:6px; color:var(--warning);">ไม่มีข้อมูลออฟไลน์ในขณะนี้</h3>
+            <p style="color:var(--text-muted); font-size:0.9rem; max-width:440px; margin:0 auto;">
+              กรุณาเชื่อมต่ออินเทอร์เน็ตเพื่อโหลดข้อมูลรถพ่วงล่าสุด หรือกดปุ่ม <b>"📥 โหลดข้อมูลไว้ใช้ออฟไลน์"</b> ที่เมนูด้านซ้ายล่วงหน้าครับ
+            </p>
+          `;
+        } else {
+          emptyState.innerHTML = `
+            <div class="empty-icon" style="font-size:2.5rem; margin-bottom:8px;">🚚</div>
+            <h3 style="margin-bottom:6px;">ยังไม่มีข้อมูลจัดขึ้นรถพ่วงในรอบนี้</h3>
+            <p style="color:var(--text-muted); font-size:0.9rem;">ข้อมูลน้ำหนักรถพ่วงจะคำนวณให้อัตโนมัติจากใบเสร็จรับซื้อของสมาชิกที่ระบุรถพ่วงครับ</p>
+          `;
+        }
+        emptyState.style.display = 'block';
+      }
       if (tbody) tbody.closest('.table-container').style.display = 'none';
     } else {
       if (emptyState) emptyState.style.display = 'none';
       if (tbody) tbody.closest('.table-container').style.display = 'block';
       if (tbody) {
-        tbody.innerHTML = truckList.map(t => `
-          <tr>
-            <td><strong style="color:var(--gold); font-size:1rem;">🚛 ${t.truck_number}</strong></td>
-            <td>${formatNumber(t.head_weight)} กก.</td>
-            <td>${formatNumber(t.trailer_weight)} กก.</td>
-            <td style="font-weight:700; color:var(--green); font-size:1rem;">${formatNumber(t.total_weight)} กก.</td>
-            <td><span class="badge badge-info">${t.tx_count} เที่ยว (${t.members.size} ราย)</span></td>
-            <td>
-              <button class="btn btn-secondary btn-sm" onclick="showTruckMembersModal('${t.truck_number}')">🔍 ดูรายชื่อสมาชิกในรถคันนี้</button>
-            </td>
-          </tr>
-        `).join('');
+        tbody.innerHTML = truckList.map(t => {
+          const pendingBadge = t.pending_count > 0 
+            ? `<span class="badge badge-danger" style="background:#ef4444; color:#fff; font-size:0.75rem; margin-left:6px;">🔴 รอซิงค์ ${t.pending_count} รายการ</span>` 
+            : '';
+
+          return `
+            <tr>
+              <td>
+                <strong style="color:var(--gold); font-size:1rem;">🚛 ${t.truck_number}</strong>
+                ${pendingBadge}
+              </td>
+              <td>${formatNumber(t.head_weight)} กก.</td>
+              <td>${formatNumber(t.trailer_weight)} กก.</td>
+              <td style="font-weight:700; color:var(--green); font-size:1rem;">${formatNumber(t.total_weight)} กก.</td>
+              <td><span class="badge badge-info">${t.tx_count} เที่ยว (${t.members.size} ราย)</span></td>
+              <td>
+                <button class="btn btn-secondary btn-sm" onclick="showTruckMembersModal('${t.truck_number}')">🔍 ดูรายชื่อสมาชิกในรถคันนี้</button>
+              </td>
+            </tr>
+          `;
+        }).join('');
       }
     }
   } catch (err) {
+    console.error('renderTruckWeights error:', err);
     showToast('โหลดข้อมูลน้ำหนักรถพ่วงไม่สำเร็จ: ' + err.message, 'error');
   }
   hideLoading();
@@ -3280,21 +4021,15 @@ async function renderTruckWeights(targetRoundId = null) {
 
 function showTruckMembersModal(truckNum) {
   showLoading();
-  let query = sb.from('transactions').select('*').eq('truck_number', truckNum).order('date', { ascending: false });
-  if (currentTruckWeightsRoundId && currentTruckWeightsRoundId !== 'all') {
-    query = query.eq('round_id', currentTruckWeightsRoundId);
-  }
+  const isOffline = !navigator.onLine;
 
-  query.then(({ data, error }) => {
+  const renderModalContent = (items) => {
     hideLoading();
-    if (error) { showToast('โหลดข้อมูลไม่สำเร็จ: ' + error.message, 'error'); return; }
-    
-    const list = data || [];
     const modal = document.getElementById('truck-members-modal');
     const title = document.getElementById('truck-members-modal-title');
     const body = document.getElementById('truck-members-modal-body');
 
-    if (title) title.textContent = `🚛 รายการสมาชิกใน ${truckNum} (รวม ${list.length} รายการ)`;
+    if (title) title.textContent = `🚛 รายการสมาชิกใน ${truckNum} (รวม ${items.length} รายการ)`;
     
     if (body) {
       body.innerHTML = `
@@ -3307,31 +4042,63 @@ function showTruckMembersModal(truckNum) {
                 <th>ชื่อสมาชิก</th>
                 <th>ลักษณะพ่วง</th>
                 <th>น้ำหนักสุทธิ</th>
-                <th>ผู้บันทึก/ผู้ชั่ง</th>
+                <th>ผู้บันทึก/สถานะ</th>
               </tr>
             </thead>
             <tbody>
-              ${list.map(t => `
-                <tr>
-                  <td>${formatDateTime(t.date)}</td>
-                  <td><span class="badge badge-green">${t.member_code}</span></td>
-                  <td><strong>${t.member_name}</strong></td>
-                  <td>
-                    ${t.trailer_type === 'trailer' 
-                      ? '<span class="badge badge-warning" style="font-size:0.8rem;">🚚 ตัวลูก</span>' 
-                      : '<span class="badge badge-info" style="font-size:0.8rem;">🚛 ตัวแม่</span>'}
-                  </td>
-                  <td style="font-weight:700; color:var(--gold); font-size:0.95rem;">${formatNumber(t.final_weight || t.net_weight)} กก.</td>
-                  <td>${t.created_by_name || 'ผู้ดูแลระบบ'}</td>
-                </tr>
-              `).join('')}
+              ${items.map(t => {
+                const isPending = t.is_pending_offline === true;
+                const rowStyle = isPending ? 'background: rgba(239, 68, 68, 0.08);' : '';
+                const statusBadge = isPending 
+                  ? `<span class="badge badge-danger" style="background:#ef4444; color:#fff; font-size:0.75rem;">🔴 รอซิงค์</span>` 
+                  : `<span class="badge" style="background:rgba(255,255,255,0.08);">${t.created_by_name || t.created_by_display_name || 'ผู้ดูแลระบบ'}</span>`;
+
+                return `
+                  <tr style="${rowStyle}">
+                    <td>${formatDateTime(t.date || t.created_at || t.offline_saved_at)}</td>
+                    <td><span class="badge badge-green">${t.member_code}</span></td>
+                    <td>
+                      <strong>${t.member_name}</strong>
+                      ${isPending ? '<div style="font-size:0.75rem; color:#ef4444;">(บันทึกในเครื่อง)</div>' : ''}
+                    </td>
+                    <td>
+                      ${t.trailer_type === 'trailer' 
+                        ? '<span class="badge badge-warning" style="font-size:0.8rem;">🚚 ตัวลูก</span>' 
+                        : '<span class="badge badge-info" style="font-size:0.8rem;">🚛 ตัวแม่</span>'}
+                    </td>
+                    <td style="font-weight:700; color:var(--gold); font-size:0.95rem;">${formatNumber(t.final_weight || t.net_weight)} กก.</td>
+                    <td>${statusBadge}</td>
+                  </tr>
+                `;
+              }).join('')}
             </tbody>
           </table>
         </div>
       `;
     }
     if (modal) modal.classList.add('show');
-  });
+  };
+
+  if (!isOffline && sb) {
+    let query = sb.from('transactions').select('*').eq('truck_number', truckNum).order('date', { ascending: false });
+    if (currentTruckWeightsRoundId && currentTruckWeightsRoundId !== 'all') {
+      query = query.eq('round_id', currentTruckWeightsRoundId);
+    }
+    query.then(({ data, error }) => {
+      if (!error && data) {
+        renderModalContent(data);
+      } else {
+        const localList = (currentTruckWeightsTransactions || []).filter(t => (t.truck_number || '').trim() === truckNum);
+        renderModalContent(localList);
+      }
+    }).catch(() => {
+      const localList = (currentTruckWeightsTransactions || []).filter(t => (t.truck_number || '').trim() === truckNum);
+      renderModalContent(localList);
+    });
+  } else {
+    const localList = (currentTruckWeightsTransactions || []).filter(t => (t.truck_number || '').trim() === truckNum);
+    renderModalContent(localList);
+  }
 }
 
 function closeTruckMembersModal() {
@@ -4417,8 +5184,705 @@ async function forceSeedMembers() {
   hideLoading();
 }
 
+// ========== PWA & SERVICE WORKER REGISTRATION ==========
+let deferredPwaPrompt = null;
+
+function registerServiceWorker() {
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js')
+        .then((reg) => {
+          console.log('[PWA] Service Worker registered successfully:', reg.scope);
+          
+          reg.addEventListener('updatefound', () => {
+            const newWorker = reg.installing;
+            if (newWorker) {
+              newWorker.addEventListener('statechange', () => {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  showPwaUpdateToast(reg);
+                }
+              });
+            }
+          });
+        })
+        .catch((err) => {
+          console.warn('[PWA] Service Worker registration failed:', err);
+        });
+    });
+  }
+}
+
+// Handle PWA Install Prompt (beforeinstallprompt)
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPwaPrompt = e;
+  const installBtn = document.getElementById('pwa-install-btn');
+  if (installBtn) {
+    installBtn.style.display = 'flex';
+  }
+});
+
+// User clicks Install App Button
+async function installPWAApp() {
+  if (deferredPwaPrompt) {
+    deferredPwaPrompt.prompt();
+    const { outcome } = await deferredPwaPrompt.userChoice;
+    console.log('[PWA] User choice:', outcome);
+    if (outcome === 'accepted') {
+      const installBtn = document.getElementById('pwa-install-btn');
+      if (installBtn) installBtn.style.display = 'none';
+    }
+    deferredPwaPrompt = null;
+    return;
+  }
+
+  // If already running in standalone PWA mode
+  if (window.matchMedia('(display-mode: standalone)').matches || navigator.standalone) {
+    showToast('📱 แอปพลิเคชันนี้ถูกติดตั้งลงบนเครื่องและกำลังเปิดใช้งานในโหมดแอปเรียบร้อยแล้ว!', 'info');
+    return;
+  }
+
+  // Open Install Guide Modal
+  openPwaInstallModal();
+}
+window.installPWAApp = installPWAApp;
+
+// App installed successfully
+window.addEventListener('appinstalled', () => {
+  console.log('[PWA] App installed successfully');
+  const installBtn = document.getElementById('pwa-install-btn');
+  if (installBtn) installBtn.style.display = 'none';
+  showToast('🎉 ติดตั้งแอปพลิเคชันลงบนเครื่องเรียบร้อยแล้ว!');
+});
+
+// PWA Update Toast
+function showPwaUpdateToast() {
+  showToast('🔔 มีการอัปเดตระบบใหม่! <button onclick="applyPwaUpdate()" style="margin-left:8px; padding:2px 8px; background:#10b981; border:none; color:white; border-radius:4px; cursor:pointer;">รีเฟรชอัปเดต</button>', 'info');
+}
+
+function applyPwaUpdate() {
+  if (navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ action: 'skipWaiting' });
+  }
+  window.location.reload();
+}
+window.applyPwaUpdate = applyPwaUpdate;
+
+function openPwaInstallModal() {
+  let modal = document.getElementById('pwa-install-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'pwa-install-modal';
+    modal.className = 'modal-overlay';
+    modal.style.display = 'flex';
+    modal.style.zIndex = '999999';
+    modal.innerHTML = `
+      <div class="modal-card" style="max-width:480px; text-align:left; background:var(--card-bg); border:1px solid rgba(255,255,255,0.15); border-radius:12px; padding:20px; box-shadow:0 20px 40px rgba(0,0,0,0.5);">
+        <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.1); padding-bottom:12px; margin-bottom:16px;">
+          <h3 style="margin:0; font-size:1.15rem; color:#34d399; display:flex; align-items:center; gap:8px;">📱 วิธีติดตั้งแอปบนคอมพิวเตอร์ / มือถือ</h3>
+          <button onclick="closePwaInstallModal()" style="background:none; border:none; color:white; font-size:1.4rem; cursor:pointer;">&times;</button>
+        </div>
+        <div style="font-size:0.9rem; line-height:1.6; color:var(--text-secondary);">
+          <p style="margin-top:0;">คุณสามารถติดตั้งแอปพลิเคชันนี้ลงบนเดสก์ท็อปหรือมือถือได้ง่ายๆ เพื่อใช้งานเสมือนแอปจริง (ไม่ต้องเปิดเบราว์เซอร์):</p>
+          <div style="background:rgba(255,255,255,0.05); padding:12px 14px; border-radius:8px; margin:12px 0; border:1px solid rgba(255,255,255,0.1);">
+            <strong style="color:white; display:block; margin-bottom:4px;">💻 สำหรับคอมพิวเตอร์ (Google Chrome / Microsoft Edge):</strong>
+            1. มองที่ <b>แถบ URL ด้านบนสุด</b> มุมขวาบน<br>
+            2. คลิกไอคอน <b>"ติดตั้งแอป" (📱 หรือ ⊕)</b> ที่แถบ URL<br>
+            3. หรือคลิกเมนู <b>จุด 3 จุด (⋮)</b> ➔ เลือก <b>"สร้างทางลัด..." (Create Shortcut)</b> ติ๊กเลือก <i>"เปิดเป็นหน้าต่าง"</i>
+          </div>
+          <div style="background:rgba(255,255,255,0.05); padding:12px 14px; border-radius:8px; margin:12px 0; border:1px solid rgba(255,255,255,0.1);">
+            <strong style="color:white; display:block; margin-bottom:4px;">📱 สำหรับมือถือ (Android / iPhone):</strong>
+            1. คลิกเมนูเบราว์เซอร์ <b>(จุด 3 จุด บน Android / ปุ่มแชร์ 📤 บน Safari iPhone)</b><br>
+            2. เลือก <b>"เพิ่มไปยังหน้าจอโฮม" (Add to Home Screen)</b>
+          </div>
+        </div>
+        <div style="text-align:right; margin-top:16px;">
+          <button class="btn btn-primary" onclick="closePwaInstallModal()">รับทราบและปิด</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  } else {
+    modal.style.display = 'flex';
+  }
+}
+window.openPwaInstallModal = openPwaInstallModal;
+
+function closePwaInstallModal() {
+  const modal = document.getElementById('pwa-install-modal');
+  if (modal) modal.style.display = 'none';
+}
+window.closePwaInstallModal = closePwaInstallModal;
+
+// ========== INDEXEDDB OFFLINE STORAGE ENGINE ==========
+const IDB_NAME = 'RubberPlantationDB';
+const IDB_VERSION = 2;
+let idbPromise = null;
+
+function initIndexedDB() {
+  if (idbPromise) return idbPromise;
+  idbPromise = new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      console.warn('IndexedDB not supported on this browser');
+      resolve(null);
+      return;
+    }
+    const request = indexedDB.open(IDB_NAME, IDB_VERSION);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('members')) {
+        db.createObjectStore('members', { keyPath: 'code' });
+      }
+      if (!db.objectStoreNames.contains('settings')) {
+        db.createObjectStore('settings', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('rounds')) {
+        db.createObjectStore('rounds', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('meta')) {
+        db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('pending_transactions')) {
+        db.createObjectStore('pending_transactions', { keyPath: 'client_id' });
+      }
+      if (!db.objectStoreNames.contains('transactions')) {
+        db.createObjectStore('transactions', { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => {
+      console.error('IndexedDB open error:', e);
+      resolve(null);
+    };
+  });
+  return idbPromise;
+}
+
+// Download Essential Data Cache into IndexedDB
+async function downloadOfflineDataCache(silent = false) {
+  if (!silent) showLoading();
+  try {
+    const db = await initIndexedDB();
+    if (!db) throw new Error('IndexedDB ไม่พร้อมใช้งาน');
+
+    // 1. Fetch Members
+    let membersData = [];
+    try {
+      const { data, error } = await sb.from('members').select('*');
+      if (!error && data) membersData = data;
+    } catch { /* ignore */ }
+    if (membersData.length === 0 && Array.isArray(window.SEED_MEMBERS)) {
+      membersData = window.SEED_MEMBERS;
+    }
+
+    // Save Members to IDB
+    if (membersData.length > 0) {
+      const tx = db.transaction('members', 'readwrite');
+      const store = tx.objectStore('members');
+      store.clear();
+      membersData.forEach(m => store.put(m));
+    }
+
+    // 2. Fetch Settings
+    try {
+      const { data: setArr } = await sb.from('settings').select('*').eq('id', 1);
+      if (setArr && setArr.length > 0) {
+        cachedSettings = setArr[0];
+        const txSet = db.transaction('settings', 'readwrite');
+        txSet.objectStore('settings').put(cachedSettings);
+      }
+    } catch { /* ignore */ }
+
+    // 3. Fetch Active Round
+    try {
+      const { data: roundArr } = await sb.from('purchase_rounds').select('*').eq('status', 'open').order('id', { ascending: false }).limit(1);
+      if (roundArr && roundArr.length > 0) {
+        currentRound = roundArr[0];
+        const txRound = db.transaction('rounds', 'readwrite');
+        txRound.objectStore('rounds').put(currentRound);
+      }
+    } catch { /* ignore */ }
+
+    // 4. Fetch Transactions Cache (Recent 500 records)
+    let cachedTxCount = 0;
+    try {
+      const { data: txArr, error: txErr } = await sb.from('transactions').select('*').order('date', { ascending: false }).limit(500);
+      if (!txErr && Array.isArray(txArr) && txArr.length > 0) {
+        const txStore = db.transaction('transactions', 'readwrite').objectStore('transactions');
+        txStore.clear();
+        txArr.forEach(t => txStore.put(t));
+        cachedTxCount = txArr.length;
+      }
+    } catch { /* ignore */ }
+
+    // 5. Save Cache Timestamp Meta
+    const nowIso = new Date().toISOString();
+    const metaTx = db.transaction('meta', 'readwrite');
+    metaTx.objectStore('meta').put({ key: 'last_cache_time', value: nowIso, count: membersData.length });
+
+    updateOfflineCacheTimestampUI(nowIso, membersData.length);
+    if (!silent) {
+      showToast(`📥 ดาวน์โหลดข้อมูลไว้ใช้ออฟไลน์เรียบร้อย! (สมาชิก ${membersData.length} คน, ประวัติ ${cachedTxCount} รายการ, การตั้งค่า)`);
+    }
+  } catch (err) {
+    console.error('downloadOfflineDataCache error:', err);
+    if (!silent) showToast('ดาวน์โหลดข้อมูลออฟไลน์ไม่สำเร็จ: ' + err.message, 'error');
+  }
+  if (!silent) hideLoading();
+}
+window.downloadOfflineDataCache = downloadOfflineDataCache;
+
+// Load Cached Timestamp and update UI
+async function updateOfflineCacheTimestampUI(isoTime = null, count = 0) {
+  const badge = document.getElementById('offline-cache-timestamp-badge');
+  if (!badge) return;
+
+  if (!isoTime) {
+    try {
+      const db = await initIndexedDB();
+      if (db) {
+        const tx = db.transaction('meta', 'readonly');
+        const req = tx.objectStore('meta').get('last_cache_time');
+        req.onsuccess = () => {
+          if (req.result) {
+            renderOfflineCacheBadgeText(req.result.value, req.result.count);
+          }
+        };
+      }
+    } catch { /* ignore */ }
+  } else {
+    renderOfflineCacheBadgeText(isoTime, count);
+  }
+}
+
+function renderOfflineCacheBadgeText(isoTime, count) {
+  const badge = document.getElementById('offline-cache-timestamp-badge');
+  if (!badge) return;
+  try {
+    const d = new Date(isoTime);
+    const dateStr = d.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' });
+    const timeStr = d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    badge.innerHTML = `📅 ข้อมูลออฟไลน์: ${dateStr} ${timeStr}น. (${count || 158} คน)`;
+    badge.style.color = '#34d399';
+  } catch {
+    badge.textContent = '📅 ข้อมูลออฟไลน์: บันทึกในเครื่องแล้ว';
+  }
+}
+
+// Unified Member Data Fetcher (Online Supabase -> Offline IndexedDB Cache -> SEED_MEMBERS Fallback)
+async function fetchMembersData(searchQuery = '', limit = 1000) {
+  let members = [];
+  const q = searchQuery ? searchQuery.trim().toLowerCase() : '';
+
+  // 1. Try Supabase if Online
+  if (navigator.onLine && sb) {
+    try {
+      let sbQuery = sb.from('members').select('*').order('code');
+      if (limit && !q) sbQuery = sbQuery.limit(limit);
+      const { data, error } = await sbQuery;
+      if (!error && Array.isArray(data) && data.length > 0) {
+        members = data;
+      }
+    } catch (err) {
+      console.warn('[FetchMembers] Supabase query failed, switching to local cache:', err);
+    }
+  }
+
+  // 2. Fallback to IndexedDB Local Cache if Offline or Supabase empty
+  if (members.length === 0) {
+    try {
+      const cached = await getOfflineCachedMembers();
+      if (Array.isArray(cached) && cached.length > 0) {
+        members = cached;
+      }
+    } catch (e) {
+      console.warn('[FetchMembers] IndexedDB cache read failed:', e);
+    }
+  }
+
+  // 3. Fallback to SEED_MEMBERS (158 members)
+  if (members.length === 0 && Array.isArray(window.SEED_MEMBERS)) {
+    members = window.SEED_MEMBERS;
+  }
+
+  // Client-side search filtering
+  if (q) {
+    members = members.filter(m => 
+      (m.code && m.code.toString().toLowerCase().includes(q)) || 
+      (m.name && m.name.toLowerCase().includes(q))
+    );
+  }
+
+  if (limit && members.length > limit) {
+    members = members.slice(0, limit);
+  }
+
+  return members;
+}
+window.fetchMembersData = fetchMembersData;
+
+// Get Cached Members from IDB if offline
+async function getOfflineCachedMembers() {
+  try {
+    const db = await initIndexedDB();
+    if (!db) return window.SEED_MEMBERS || [];
+    return new Promise((resolve) => {
+      const tx = db.transaction('members', 'readonly');
+      const req = tx.objectStore('members').getAll();
+      req.onsuccess = () => resolve(req.result && req.result.length > 0 ? req.result : window.SEED_MEMBERS || []);
+      req.onerror = () => resolve(window.SEED_MEMBERS || []);
+    });
+  } catch {
+    return window.SEED_MEMBERS || [];
+  }
+}
+
+// Unique client-side ID generator for offline duplicate prevention
+function generateOfflineClientId() {
+  return 'off_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// Save Transaction Offline into IndexedDB Queue
+async function saveOfflinePendingTransaction(payload, isDualMode = false) {
+  try {
+    const db = await initIndexedDB();
+    if (!db) throw new Error('IndexedDB ไม่พร้อมใช้งาน');
+
+    const clientId = generateOfflineClientId();
+    const offlinePayload = {
+      ...payload,
+      client_id: clientId,
+      is_offline: true,
+      offline_saved_at: new Date().toISOString(),
+      sync_status: 'pending_offline',
+      target_table: isDualMode ? 'pending_transactions' : 'transactions'
+    };
+
+    const tx = db.transaction('pending_transactions', 'readwrite');
+    tx.objectStore('pending_transactions').put(offlinePayload);
+
+    showToast(`🟠 บันทึกในเครื่องแล้ว (โหมดออฟไลน์)! รอซิงค์ขึ้นระบบเมื่อมีเน็ต`, 'warning');
+    
+    // Receipt printing works normally using local payload data
+    if (!isDualMode) {
+      const receiptData = {
+        ...offlinePayload,
+        id: clientId,
+        created_at: offlinePayload.date
+      };
+      showReceipt(receiptData);
+    }
+
+    await initPurchase();
+    updateOfflineQueueBadgeUI();
+    return offlinePayload;
+  } catch (err) {
+    console.error('saveOfflinePendingTransaction error:', err);
+    showToast('ไม่สามารถบันทึกข้อมูลออฟไลน์ได้: ' + err.message, 'error');
+  }
+}
+window.saveOfflinePendingTransaction = saveOfflinePendingTransaction;
+
+// Auto Sync Offline Queue to Supabase when Network Restored
+let isSyncingOfflineQueue = false;
+
+async function syncOfflinePendingTransactions() {
+  if (isSyncingOfflineQueue || !navigator.onLine) return;
+  isSyncingOfflineQueue = true;
+
+  console.group('🔄 [Offline Sync Engine] Started');
+  try {
+    const db = await initIndexedDB();
+    if (!db) {
+      console.warn('[Offline Sync Engine] IndexedDB not available');
+      isSyncingOfflineQueue = false;
+      console.groupEnd();
+      return;
+    }
+
+    const pendingItems = await new Promise((resolve) => {
+      const tx = db.transaction('pending_transactions', 'readonly');
+      const req = tx.objectStore('pending_transactions').getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+
+    console.log(`[Offline Sync Engine] Pending queue contains ${pendingItems.length} items:`, pendingItems);
+
+    if (pendingItems.length === 0) {
+      isSyncingOfflineQueue = false;
+      updateOfflineQueueBadgeUI(0);
+      console.groupEnd();
+      return;
+    }
+
+    showToast(`🔄 กำลังซิงค์ข้อมูลออฟไลน์ ${pendingItems.length} รายการ ขึ้นเซิร์ฟเวอร์...`, 'info');
+
+    // STEP 1: Sync Members (target_table === 'members')
+    const memberItems = pendingItems.filter(item => item.target_table === 'members');
+    for (const mItem of memberItems) {
+      try {
+        const payload = {
+          code: mItem.code,
+          name: mItem.name,
+          phone: mItem.phone || '',
+          account_no: mItem.account_no || '',
+          created_at: mItem.created_at || new Date().toISOString()
+        };
+        console.log(`[Offline Sync Engine] Syncing member ${mItem.code} (${mItem.name})...`, payload);
+
+        const { data: resMember, error: mErr } = await sb.from('members').upsert(payload, { onConflict: 'code' }).select().single();
+        if (!mErr && resMember) {
+          console.log(`[Offline Sync Engine] ✅ Member ${mItem.code} synced successfully to Supabase:`, resMember);
+          const delTx = db.transaction('pending_transactions', 'readwrite');
+          delTx.objectStore('pending_transactions').delete(mItem.client_id);
+
+          // Update local IDB members cache
+          try {
+            const mStore = db.transaction('members', 'readwrite').objectStore('members');
+            mStore.put(resMember);
+          } catch {}
+        } else {
+          console.error(`[Offline Sync Engine Error] Failed to sync member ${mItem.code}:`, mErr);
+        }
+      } catch (err) {
+        console.error('[Offline Sync Engine Error] Member sync exception:', err);
+      }
+    }
+
+    // STEP 2: Process Offline Round Creations (target_table === 'purchase_rounds')
+    const roundCreations = pendingItems.filter(item => item.target_table === 'purchase_rounds');
+    const roundIdMap = {}; // tempRoundId -> realRoundId
+
+    for (const roundItem of roundCreations) {
+      try {
+        const tempId = roundItem.id || roundItem.client_id;
+        const payload = {
+          title: roundItem.title,
+          status: roundItem.status || 'open',
+          start_date: roundItem.start_date || new Date().toISOString()
+        };
+
+        console.log(`[Offline Sync Engine] Syncing round creation "${roundItem.title}" (temp ID: ${tempId})...`, payload);
+
+        const { data: newRound, error: rErr } = await sb.from('purchase_rounds').insert(payload).select().single();
+        if (!rErr && newRound) {
+          const realId = newRound.id;
+          roundIdMap[String(tempId)] = realId;
+          console.log(`[Offline Sync Engine] ✅ Round created on Supabase with real ID ${realId}:`, newRound);
+
+          // Remove round creation item from queue
+          const delTx = db.transaction('pending_transactions', 'readwrite');
+          delTx.objectStore('pending_transactions').delete(roundItem.client_id);
+
+          // Update local IDB rounds store
+          try {
+            const rTx = db.transaction('rounds', 'readwrite');
+            rTx.objectStore('rounds').delete(tempId);
+            rTx.objectStore('rounds').put(newRound);
+          } catch {}
+
+          if (currentRound && String(currentRound.id) === String(tempId)) {
+            currentRound = newRound;
+          }
+        } else {
+          console.error('[Offline Sync Engine Error] Failed to create round on Supabase:', rErr);
+        }
+      } catch (err) {
+        console.error('[Offline Sync Engine Error] Offline round creation sync exception:', err);
+      }
+    }
+
+    // STEP 3: Process Offline Round Closures (target_table === 'purchase_rounds_close')
+    const roundClosures = pendingItems.filter(item => item.target_table === 'purchase_rounds_close');
+    for (const closeItem of roundClosures) {
+      try {
+        let rId = closeItem.round_id;
+        if (roundIdMap[String(rId)]) rId = roundIdMap[String(rId)];
+
+        let updatePayload = {
+          status: 'closed',
+          end_date: closeItem.end_date || new Date().toISOString(),
+          closed_at: closeItem.end_date || new Date().toISOString(),
+          closed_by_name: closeItem.closed_by_name || 'ผู้ดูแลระบบ'
+        };
+
+        console.log(`[Offline Sync Engine] Syncing round closure for round ID ${rId}...`, updatePayload);
+
+        let { error: closeErr } = await sb.from('purchase_rounds').update(updatePayload).eq('id', rId);
+        if (closeErr) {
+          delete updatePayload.closed_at;
+          delete updatePayload.closed_by_name;
+          await sb.from('purchase_rounds').update(updatePayload).eq('id', rId);
+        }
+
+        console.log(`[Offline Sync Engine] ✅ Round closure synced successfully for round ${rId}`);
+        const delTx = db.transaction('pending_transactions', 'readwrite');
+        delTx.objectStore('pending_transactions').delete(closeItem.client_id);
+      } catch (err) {
+        console.error('[Offline Sync Engine Error] Offline round close sync exception:', err);
+      }
+    }
+
+    // STEP 4: Re-fetch remaining pending items for transactions and sync
+    const remainingPending = await new Promise((resolve) => {
+      const tx = db.transaction('pending_transactions', 'readonly');
+      const req = tx.objectStore('pending_transactions').getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+
+    let syncedCount = 0;
+    for (const item of remainingPending) {
+      if (item.target_table === 'purchase_rounds' || item.target_table === 'purchase_rounds_close' || item.target_table === 'members') continue;
+
+      try {
+        const targetTable = item.target_table || 'transactions';
+        const payloadToUpload = { ...item };
+
+        // Map temp round_id to real Supabase round ID if mapped
+        if (payloadToUpload.round_id && roundIdMap[String(payloadToUpload.round_id)]) {
+          payloadToUpload.round_id = roundIdMap[String(payloadToUpload.round_id)];
+        } else if ((!payloadToUpload.round_id || String(payloadToUpload.round_id).startsWith('temp_round_')) && Object.keys(roundIdMap).length > 0) {
+          const firstRealRoundId = Object.values(roundIdMap)[0];
+          if (firstRealRoundId) payloadToUpload.round_id = firstRealRoundId;
+        }
+
+        // CRITICAL: Delete temporary string IDs and local metadata fields before sending to Supabase!
+        delete payloadToUpload.id; // Prevents "invalid input syntax for type bigint" Postgres Error
+        delete payloadToUpload.client_id;
+        delete payloadToUpload.is_offline;
+        delete payloadToUpload.is_offline_pending;
+        delete payloadToUpload.is_offline_round;
+        delete payloadToUpload.offline_saved_at;
+        delete payloadToUpload.sync_status;
+        delete payloadToUpload.target_table;
+        delete payloadToUpload.is_pending_offline;
+
+        console.log(`[Offline Sync Engine] Syncing transaction for ${payloadToUpload.member_name} (${payloadToUpload.member_code}) to table "${targetTable}"...`, payloadToUpload);
+
+        let { data: insertedData, error } = await sb.from(targetTable).insert(payloadToUpload).select().single();
+        if (error && error.message && error.message.includes('column')) {
+          delete payloadToUpload.trips;
+          delete payloadToUpload.cart_weight;
+          delete payloadToUpload.auction_price;
+          delete payloadToUpload.yard_fee;
+          delete payloadToUpload.created_by_display_name;
+          delete payloadToUpload.confirmed_by_display_name;
+          let res = await sb.from(targetTable).insert(payloadToUpload).select().single();
+          if (res.error && res.error.message.includes('column')) {
+            delete payloadToUpload.trips_detail;
+            res = await sb.from(targetTable).insert(payloadToUpload).select().single();
+          }
+          insertedData = res.data;
+          error = res.error;
+        }
+
+        if (!error) {
+          console.log(`[Offline Sync Engine] ✅ Transaction synced successfully:`, insertedData);
+          const delTx = db.transaction('pending_transactions', 'readwrite');
+          delTx.objectStore('pending_transactions').delete(item.client_id);
+          syncedCount++;
+
+          // Cache confirmed transaction into IDB transactions store
+          if (insertedData) {
+            try {
+              const txStore = db.transaction('transactions', 'readwrite').objectStore('transactions');
+              txStore.put(insertedData);
+            } catch {}
+          }
+        } else {
+          console.error(`[Offline Sync Engine Error] Failed to sync transaction for ${payloadToUpload.member_code}:`, error);
+        }
+      } catch (err) {
+        console.error('[Offline Sync Engine Error] Transaction sync exception:', err);
+      }
+    }
+
+    if (syncedCount > 0 || roundCreations.length > 0 || roundClosures.length > 0 || memberItems.length > 0) {
+      showToast(`⚡ ซิงค์ข้อมูลออฟไลน์เรียบร้อยแล้ว! (สมาชิก ${memberItems.length} คน, รอบ ${roundCreations.length} รายการ, ธุรกรรม ${syncedCount} รายการ)`, 'success');
+      await downloadOfflineDataCache(true);
+      await loadCurrentRound();
+      if (currentSection === 'dashboard') renderDashboard(false);
+      if (currentSection === 'history') filterHistory();
+      if (currentSection === 'truck-weights') renderTruckWeights();
+      if (currentSection === 'rounds') renderRounds();
+      if (currentSection === 'members') renderMembers();
+    }
+  } catch (err) {
+    console.error('[Offline Sync Engine Error] Global sync exception:', err);
+  } finally {
+    isSyncingOfflineQueue = false;
+    updateOfflineQueueBadgeUI();
+    console.groupEnd();
+  }
+}
+window.syncOfflinePendingTransactions = syncOfflinePendingTransactions;
+
+// Update Connection Badge UI & Queue Count
+async function updateOfflineQueueBadgeUI(overrideCount = null) {
+  const badgeEl = document.getElementById('realtime-status-badge');
+  if (!badgeEl) return;
+
+  let pendingCount = overrideCount;
+  if (pendingCount === null) {
+    try {
+      const db = await initIndexedDB();
+      if (db) {
+        pendingCount = await new Promise((resolve) => {
+          const tx = db.transaction('pending_transactions', 'readonly');
+          const req = tx.objectStore('pending_transactions').count();
+          req.onsuccess = () => resolve(req.result || 0);
+          req.onerror = () => resolve(0);
+        });
+      }
+    } catch {
+      pendingCount = 0;
+    }
+  }
+
+  if (!navigator.onLine) {
+    badgeEl.className = 'realtime-status-badge offline';
+    const pendingText = pendingCount > 0 ? ` (มี ${pendingCount} รายการรอซิงค์)` : '';
+    badgeEl.innerHTML = `<span class="live-dot red"></span> <span class="live-text">🔴 ออฟไลน์${pendingText}</span>`;
+    badgeEl.title = `ไม่มีสัญญาณอินเทอร์เน็ต ${pendingCount} รายการถูกบันทึกไว้ในเครื่อง`;
+  } else if (pendingCount > 0) {
+    badgeEl.className = 'realtime-status-badge connecting';
+    badgeEl.innerHTML = `<span class="live-dot yellow"></span> <span class="live-text">🔄 กำลังซิงค์ (${pendingCount} รายการ)...</span>`;
+    badgeEl.title = `มีรายการออฟไลน์ ${pendingCount} รายการกำลังซิงค์ขึ้นเซิร์ฟเวอร์`;
+  } else {
+    badgeEl.className = 'realtime-status-badge';
+    badgeEl.innerHTML = `<span class="live-dot"></span> <span class="live-text">🟢 ออนไลน์ (เชื่อมต่อแล้ว)</span>`;
+    badgeEl.title = `เชื่อมต่อระบบเรียบร้อย ข้อมูลซิงค์ล่าสุดแล้ว`;
+  }
+}
+window.updateOfflineQueueBadgeUI = updateOfflineQueueBadgeUI;
+
+// Handle Online & Offline Events
+window.addEventListener('online', () => {
+  updateOfflineQueueBadgeUI();
+  showToast('🟢 เชื่อมต่ออินเทอร์เน็ตอีกครั้ง กำลังซิงค์ข้อมูลค้างส่ง...', 'info');
+  syncOfflinePendingTransactions();
+  if (currentSection === 'dashboard') renderDashboard(false);
+  initRealtimeSubscriptions();
+});
+
+window.addEventListener('online', () => {
+  updateOfflineQueueBadgeUI();
+  showToast('🟢 กลับมาเชื่อมต่ออินเทอร์เน็ตแล้ว! กำลังซิงค์ข้อมูลลงเซิร์ฟเวอร์...', 'info');
+  silentValidateSession();
+  syncOfflinePendingTransactions();
+});
+
+window.addEventListener('offline', () => {
+  updateOfflineQueueBadgeUI();
+  showToast('🔴 ขาดการเชื่อมต่ออินเทอร์เน็ต ระบบสลับเข้าสู่โหมดออฟไลน์ (สามารถบันทึกธุรกรรมและพิมพ์ใบเสร็จในเครื่องได้ปกติ)', 'warning');
+});
+
 // ========== INITIALIZATION ==========
 async function init() {
+  registerServiceWorker();
+  initIndexedDB();
   updatePlantationLogo();
   try {
     sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -4430,8 +5894,12 @@ async function init() {
 
   if (checkAuth()) {
     showLoading();
+    if (navigator.onLine) silentValidateSession();
     await seedInitialMembers();
     await showApp();
+    updateOfflineCacheTimestampUI();
+    updateOfflineQueueBadgeUI();
+    if (navigator.onLine) syncOfflinePendingTransactions();
     hideLoading();
   } else {
     document.getElementById('login-page').style.display = 'flex';
