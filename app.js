@@ -842,56 +842,70 @@ async function renderRounds() {
     // Render active round detail card
     const activeDetailEl = document.getElementById('active-round-detail');
     if (currentRound) {
-      // 2. Fetch Transactions for Active Round (Combine Online + Offline Cache + Offline Queue)
-      let txArr = [];
+      // 2. Fetch Transactions from ALL 4 SOURCES for Active Round
+      let onlineTx = [];
+      let onlinePending = [];
+      let pendingTx = [];
+      let cachedTx = [];
 
       if (navigator.onLine && sb) {
         try {
           const { data: roundTx } = await sb.from('transactions').select('*').eq('round_id', currentRound.id);
-          if (Array.isArray(roundTx)) txArr = roundTx;
-        } catch { isOffline = true; }
+          if (Array.isArray(roundTx)) onlineTx = roundTx;
+        } catch {}
+
+        try {
+          const { data: pData } = await sb.from('pending_transactions').select('*').eq('round_id', currentRound.id);
+          if (Array.isArray(pData)) onlinePending = pData;
+        } catch {}
       }
 
-      if (isOffline || txArr.length === 0) {
-        let cachedTx = [];
-        let pendingTx = [];
-
-        try {
-          const db = await initIndexedDB();
-          if (db && db.objectStoreNames.contains('transactions')) {
-            cachedTx = await new Promise((resolve) => {
-              const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
-              req.onsuccess = () => resolve(req.result || []);
-              req.onerror = () => resolve([]);
-            });
-          }
-        } catch {}
-
-        try {
-          const db = await initIndexedDB();
-          if (db && db.objectStoreNames.contains('pending_transactions')) {
-            const pendingAll = await new Promise((resolve) => {
-              const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
-              req.onsuccess = () => resolve(req.result || []);
-              req.onerror = () => resolve([]);
-            });
-            pendingTx = pendingAll.filter(p => p.target_table !== 'purchase_rounds' && p.target_table !== 'purchase_rounds_close').map(p => ({
-              ...p,
-              id: p.id || p.client_id,
-              is_pending_offline: true
-            }));
-          }
-        } catch {}
-
-        const seenTxIds = new Set(pendingTx.map(p => p.id));
-        const uniqueCachedTx = cachedTx.filter(c => !seenTxIds.has(c.id));
-        let mergedTx = [...pendingTx, ...uniqueCachedTx];
-
-        if (currentRound.id) {
-          mergedTx = mergedTx.filter(t => String(t.round_id) === String(currentRound.id));
+      try {
+        const db = await initIndexedDB();
+        if (db && db.objectStoreNames.contains('pending_transactions')) {
+          const pendingAll = await new Promise((resolve) => {
+            const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+          pendingTx = pendingAll.filter(p => p.target_table !== 'purchase_rounds' && p.target_table !== 'purchase_rounds_close').map(p => ({
+            ...p,
+            id: p.id || p.client_id,
+            is_pending_offline: true
+          }));
         }
-        txArr = mergedTx;
+
+        if (db && db.objectStoreNames.contains('transactions')) {
+          cachedTx = await new Promise((resolve) => {
+            const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          });
+        }
+      } catch {}
+
+      const seenTxIds = new Set();
+      const mergedList = [];
+
+      const allSources = [...onlineTx, ...onlinePending, ...pendingTx, ...cachedTx];
+      for (const t of allSources) {
+        if (!t) continue;
+        const tRoundId = String(t.round_id || '');
+        const targetId = String(currentRound.id);
+        const isMatchingRound = tRoundId === targetId || 
+                                (currentRound.client_id && tRoundId === String(currentRound.client_id)) ||
+                                !t.round_id;
+
+        if (isMatchingRound) {
+          const uniqueKey = String(t.id || t.client_id || (t.member_code + '_' + (t.date || t.created_at || '')));
+          if (!seenTxIds.has(uniqueKey)) {
+            seenTxIds.add(uniqueKey);
+            mergedList.push(t);
+          }
+        }
       }
+
+      const txArr = mergedList;
 
       const totalCount = txArr.length;
       const uniqueMembers = new Set(txArr.map(t => t.member_code)).size;
@@ -1146,22 +1160,17 @@ async function showRoundReport(roundId) {
   try {
     let round = null;
     let transactions = [];
-    let isOffline = !navigator.onLine;
 
+    // 1. Fetch round metadata (Online Supabase -> Offline IDB Fallback)
     if (navigator.onLine && sb) {
       try {
         const { data: rData } = await sb.from('purchase_rounds').select('*').eq('id', roundId).single();
         if (rData) round = rData;
-        const { data: txList } = await sb.from('transactions').select('*').eq('round_id', roundId).order('date');
-        if (Array.isArray(txList)) transactions = txList;
-      } catch { isOffline = true; }
-    } else {
-      isOffline = true;
+      } catch {}
     }
 
-    if (isOffline || !round) {
-      // Offline fallback for round details
-      if (currentRound && String(currentRound.id) === String(roundId)) {
+    if (!round) {
+      if (currentRound && (String(currentRound.id) === String(roundId) || String(currentRound.client_id) === String(roundId))) {
         round = currentRound;
       } else {
         try {
@@ -1172,51 +1181,81 @@ async function showRoundReport(roundId) {
               req.onsuccess = () => res(req.result || []);
               req.onerror = () => res([]);
             });
-            round = allR.find(r => String(r.id) === String(roundId));
+            round = allR.find(r => String(r.id) === String(roundId) || (r.client_id && String(r.client_id) === String(roundId)));
           }
         } catch {}
       }
-
-      if (!round) round = { id: roundId, title: 'รอบส่งมอบยาง (ออฟไลน์)', start_date: new Date().toISOString() };
-
-      // Offline fallback for transactions
-      let cachedTx = [];
-      let pendingTx = [];
-
-      try {
-        const db = await initIndexedDB();
-        if (db && db.objectStoreNames.contains('transactions')) {
-          cachedTx = await new Promise((res) => {
-            const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
-            req.onsuccess = () => res(req.result || []);
-            req.onerror = () => res([]);
-          });
-        }
-      } catch {}
-
-      try {
-        const db = await initIndexedDB();
-        if (db && db.objectStoreNames.contains('pending_transactions')) {
-          const pendingAll = await new Promise((res) => {
-            const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
-            req.onsuccess = () => res(req.result || []);
-            req.onerror = () => res([]);
-          });
-          pendingTx = pendingAll.filter(p => p.target_table !== 'purchase_rounds' && p.target_table !== 'purchase_rounds_close').map(p => ({
-            ...p,
-            id: p.id || p.client_id,
-            is_pending_offline: true
-          }));
-        }
-      } catch {}
-
-      const seenTx = new Set(pendingTx.map(p => p.id));
-      const uniqueCached = cachedTx.filter(c => !seenTx.has(c.id));
-      let merged = [...pendingTx, ...uniqueCached];
-      merged = merged.filter(t => String(t.round_id) === String(roundId));
-      merged.sort((a, b) => new Date(a.date || a.created_at || 0) - new Date(b.date || b.created_at || 0));
-      transactions = merged;
     }
+
+    if (!round) round = { id: roundId, title: 'รอบส่งมอบยาง', start_date: new Date().toISOString() };
+
+    // 2. Fetch Transactions from ALL 4 SOURCES (Online confirmed, Online pending, Local IDB queue, Local IDB cache)
+    let onlineTx = [];
+    let onlinePending = [];
+    let pendingTx = [];
+    let cachedTx = [];
+
+    if (navigator.onLine && sb) {
+      try {
+        const { data: tData } = await sb.from('transactions').select('*').eq('round_id', roundId).order('date');
+        if (Array.isArray(tData)) onlineTx = tData;
+      } catch {}
+
+      try {
+        const { data: pData } = await sb.from('pending_transactions').select('*').eq('round_id', roundId).order('date');
+        if (Array.isArray(pData)) onlinePending = pData;
+      } catch {}
+    }
+
+    try {
+      const db = await initIndexedDB();
+      if (db && db.objectStoreNames.contains('pending_transactions')) {
+        const pAll = await new Promise((res) => {
+          const req = db.transaction('pending_transactions', 'readonly').objectStore('pending_transactions').getAll();
+          req.onsuccess = () => res(req.result || []);
+          req.onerror = () => res([]);
+        });
+        pendingTx = pAll.filter(p => p.target_table !== 'purchase_rounds' && p.target_table !== 'purchase_rounds_close').map(p => ({
+          ...p,
+          id: p.id || p.client_id,
+          is_pending_offline: true
+        }));
+      }
+
+      if (db && db.objectStoreNames.contains('transactions')) {
+        cachedTx = await new Promise((res) => {
+          const req = db.transaction('transactions', 'readonly').objectStore('transactions').getAll();
+          req.onsuccess = () => res(req.result || []);
+          req.onerror = () => res([]);
+        });
+      }
+    } catch {}
+
+    // Combine all 4 sources cleanly without duplicates
+    const seenKeys = new Set();
+    const mergedList = [];
+
+    const allSources = [...onlineTx, ...onlinePending, ...pendingTx, ...cachedTx];
+    for (const t of allSources) {
+      if (!t) continue;
+      const tRoundId = String(t.round_id || '');
+      const targetId = String(roundId);
+      const isMatchingRound = tRoundId === targetId || 
+                              (round && round.client_id && tRoundId === String(round.client_id)) ||
+                              (round && round.id && tRoundId === String(round.id)) ||
+                              !t.round_id;
+
+      if (isMatchingRound) {
+        const uniqueKey = String(t.id || t.client_id || (t.member_code + '_' + (t.date || t.created_at || '')));
+        if (!seenKeys.has(uniqueKey)) {
+          seenKeys.add(uniqueKey);
+          mergedList.push(t);
+        }
+      }
+    }
+
+    mergedList.sort((a, b) => new Date(a.date || a.created_at || 0) - new Date(b.date || b.created_at || 0));
+    transactions = mergedList;
 
     currentReportRound = round;
     currentReportTxList = transactions;
